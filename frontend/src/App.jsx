@@ -3,7 +3,7 @@ import { uploadPdf } from "./api";
 import Editor from "./Editor.jsx";
 
 export default function App() {
-  const [document, setDocument] = useState(null); // upload/analyze response
+  const [document, setDocument] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -32,7 +32,8 @@ export default function App() {
         <h1>PDF Editor</h1>
         <p className="tagline">Click. Edit. Download.</p>
         <p className="subtext">
-          Upload a PDF, click on existing text to edit it, then export the result.
+          Upload a PDF, click on existing text to edit it, then export the
+          result.
         </p>
 
         <label className="upload-dropzone">
@@ -49,7 +50,8 @@ export default function App() {
         {error && <div className="error-banner">{error}</div>}
 
         <p className="footnote">
-          First 2 edits free, then editing from ₹5. Nothing is charged in this prototype yet.
+          First 2 edits free, then editing from ₹5. Nothing is charged in this
+          prototype yet.
         </p>
       </div>
     </div>

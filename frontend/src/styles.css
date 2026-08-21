@@ -21,8 +21,6 @@ body {
   color: var(--ink);
 }
 
-/* ---------- Upload screen ---------- */
-
 .upload-screen {
   min-height: 100vh;
   display: flex;
@@ -67,7 +65,9 @@ body {
   cursor: pointer;
   color: var(--accent);
   font-weight: 600;
-  transition: border-color 0.15s, background 0.15s;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
 }
 
 .upload-dropzone:hover {
@@ -100,8 +100,6 @@ body {
   font-size: 14px;
   text-align: center;
 }
-
-/* ---------- Editor screen ---------- */
 
 .editor-screen {
   min-height: 100vh;
@@ -177,6 +175,38 @@ body {
   color: var(--muted);
 }
 
+.zoom-btn {
+  background: #f4f5f7;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.zoom-btn:hover {
+  background: #e9eaee;
+}
+
+.zoom-pct {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  min-width: 42px;
+  text-align: center;
+}
+
+.zoom-pct:hover {
+  color: var(--accent);
+}
+
 button {
   font-family: inherit;
   font-size: 14px;
@@ -188,6 +218,11 @@ button {
   display: flex;
   justify-content: center;
   padding: 32px;
+}
+
+.page-canvas-wrapper {
+  position: relative;
+  overflow: hidden;
 }
 
 .page-canvas {
@@ -257,4 +292,81 @@ button {
   font-size: 12px;
   line-height: 1;
   cursor: pointer;
+}
+
+.image-box {
+  position: absolute;
+  border: 1px dashed transparent;
+  cursor: move;
+}
+
+.image-box:hover {
+  border-color: var(--accent);
+}
+
+.image-box.selected {
+  border: 2px solid var(--accent);
+  z-index: 20;
+}
+
+.image-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
+  display: block;
+}
+
+.image-toolbar {
+  position: absolute;
+  top: -34px;
+  left: 0;
+  display: flex;
+  gap: 4px;
+}
+
+.image-action-btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.image-action-btn:hover {
+  background: var(--accent-dark);
+}
+
+.resize-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--accent);
+  border: 2px solid white;
+  border-radius: 50%;
+}
+
+.handle-nw {
+  top: -6px;
+  left: -6px;
+  cursor: nwse-resize;
+}
+.handle-ne {
+  top: -6px;
+  right: -6px;
+  cursor: nesw-resize;
+}
+.handle-sw {
+  bottom: -6px;
+  left: -6px;
+  cursor: nesw-resize;
+}
+.handle-se {
+  bottom: -6px;
+  right: -6px;
+  cursor: nwse-resize;
 }

@@ -7,6 +7,9 @@ export default function Editor({ document, onStartOver }) {
   const [activeSpanId, setActiveSpanId] = useState(null);
   const [addedTexts, setAddedTexts] = useState([]);
   const [addMode, setAddMode] = useState(false);
+  const [imageEdits, setImageEdits] = useState({});
+  const [selectedImageId, setSelectedImageId] = useState(null);
+  const fileInputRefs = useRef({});
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
   const [fitScale, setFitScale] = useState(1);
@@ -50,10 +53,109 @@ export default function Editor({ document, onStartOver }) {
     setZoomMultiplier(1);
   }
 
+  function getImageBbox(img) {
+    return imageEdits[img.id]?.bbox || img.bbox;
+  }
+
+  function startImageDrag(e, img, mode) {
+    e.stopPropagation();
+    e.preventDefault();
+    setSelectedImageId(img.id);
+    const startBbox = getImageBbox(img);
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+
+    function onMove(ev) {
+      const dxPdf = (ev.clientX - startClientX) / displayScale / zoom;
+      const dyPdf = (ev.clientY - startClientY) / displayScale / zoom;
+      let [x0, y0, x1, y1] = startBbox;
+
+      if (mode === "move") {
+        x0 += dxPdf;
+        x1 += dxPdf;
+        y0 += dyPdf;
+        y1 += dyPdf;
+      } else if (mode === "resize-se") {
+        x1 += dxPdf;
+        y1 += dyPdf;
+      } else if (mode === "resize-sw") {
+        x0 += dxPdf;
+        y1 += dyPdf;
+      } else if (mode === "resize-ne") {
+        x1 += dxPdf;
+        y0 += dyPdf;
+      } else if (mode === "resize-nw") {
+        x0 += dxPdf;
+        y0 += dyPdf;
+      }
+
+      if (x1 - x0 < 10) {
+        if (mode.includes("w")) x0 = x1 - 10;
+        else x1 = x0 + 10;
+      }
+      if (y1 - y0 < 10) {
+        if (mode.includes("n")) y0 = y1 - 10;
+        else y1 = y0 + 10;
+      }
+
+      setImageEdits((prev) => ({
+        ...prev,
+        [img.id]: { ...(prev[img.id] || {}), bbox: [x0, y0, x1, y1] },
+      }));
+    }
+
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function handleReplaceFile(img, file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(",")[1];
+      setImageEdits((prev) => ({
+        ...prev,
+        [img.id]: {
+          bbox: prev[img.id]?.bbox || img.bbox,
+          replacementDataUrl: dataUrl,
+          replacementBase64: base64,
+        },
+      }));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function resetImageEdit(imageId) {
+    setImageEdits((prev) => {
+      const next = { ...prev };
+      delete next[imageId];
+      return next;
+    });
+  }
+
+  const imageEditCount = Object.keys(imageEdits).filter((id) => {
+    const edit = imageEdits[id];
+    const img = document.pages
+      .flatMap((p) => p.images)
+      .find((i) => i.id === id);
+    if (!img) return false;
+    const bboxChanged =
+      edit.bbox && JSON.stringify(edit.bbox) !== JSON.stringify(img.bbox);
+    return bboxChanged || !!edit.replacementBase64;
+  }).length;
+
   const editedCount =
     Object.keys(editedText).filter(
       (id) => editedText[id] !== findSpan(id)?.text,
-    ).length + addedTexts.length;
+    ).length +
+    addedTexts.length +
+    imageEditCount;
 
   function findSpan(spanId) {
     return page.text_spans.find((s) => s.id === spanId);
@@ -68,7 +170,10 @@ export default function Editor({ document, onStartOver }) {
   }
 
   function handleCanvasClick(e) {
-    if (!addMode) return;
+    if (!addMode) {
+      setSelectedImageId(null);
+      return;
+    }
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / displayScale / zoom;
     const y = (e.clientY - rect.top) / displayScale / zoom;
@@ -124,6 +229,25 @@ export default function Editor({ document, onStartOver }) {
         font_size: t.font_size,
         color: t.color,
       });
+    }
+
+    for (const p of document.pages) {
+      for (const img of p.images) {
+        const edit = imageEdits[img.id];
+        if (!edit) continue;
+        const newBbox = edit.bbox || img.bbox;
+        const bboxChanged =
+          JSON.stringify(newBbox) !== JSON.stringify(img.bbox);
+        if (!bboxChanged && !edit.replacementBase64) continue;
+        ops.push({
+          type: "edit_image",
+          page: p.page_number,
+          xref: img.xref,
+          old_bbox: img.bbox,
+          new_bbox: newBbox,
+          replacement_image_base64: edit.replacementBase64 || undefined,
+        });
+      }
     }
 
     return ops;
@@ -333,6 +457,84 @@ export default function Editor({ document, onStartOver }) {
                   </div>
                 );
               })}
+
+            {page.images.map((img) => {
+              const [x0, y0, x1, y1] = getImageBbox(img);
+              const edit = imageEdits[img.id];
+              const isSelected = selectedImageId === img.id;
+              const style = {
+                left: x0 * zoom,
+                top: y0 * zoom,
+                width: (x1 - x0) * zoom,
+                height: (y1 - y0) * zoom,
+              };
+
+              return (
+                <div
+                  key={img.id}
+                  className={isSelected ? "image-box selected" : "image-box"}
+                  style={style}
+                  onMouseDown={(e) => startImageDrag(e, img, "move")}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {edit?.replacementDataUrl && (
+                    <img
+                      className="image-preview"
+                      src={edit.replacementDataUrl}
+                      alt="Replacement"
+                      draggable={false}
+                    />
+                  )}
+
+                  <input
+                    ref={(el) => (fileInputRefs.current[img.id] = el)}
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={(e) => handleReplaceFile(img, e.target.files[0])}
+                  />
+
+                  {isSelected && (
+                    <>
+                      <div className="image-toolbar">
+                        <button
+                          className="image-action-btn"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fileInputRefs.current[img.id]?.click();
+                          }}
+                        >
+                          Replace
+                        </button>
+                        {edit && (
+                          <button
+                            className="image-action-btn"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              resetImageEdit(img.id);
+                            }}
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
+
+                      {["nw", "ne", "sw", "se"].map((corner) => (
+                        <div
+                          key={corner}
+                          className={`resize-handle handle-${corner}`}
+                          onMouseDown={(e) =>
+                            startImageDrag(e, img, `resize-${corner}`)
+                          }
+                        />
+                      ))}
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>

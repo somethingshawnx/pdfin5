@@ -5,7 +5,7 @@ backend/__pycache__/
 backend/**/__pycache__/
 *.pyc
 
-# Backend runtime storage (uploaded/exported PDFs — never commit user files)
+# Backend runtime storage
 backend/storage/
 
 # Node / frontend
@@ -16,5 +16,3 @@ frontend/.vite/
 # OS/editor junk
 .DS_Store
 Thumbs.db
-.vscode/*
-!.vscode/settings.json
