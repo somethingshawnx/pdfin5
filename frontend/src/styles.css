@@ -355,18 +355,45 @@ button {
   left: -6px;
   cursor: nwse-resize;
 }
+
 .handle-ne {
   top: -6px;
   right: -6px;
   cursor: nesw-resize;
 }
+
 .handle-sw {
   bottom: -6px;
   left: -6px;
   cursor: nesw-resize;
 }
+
 .handle-se {
   bottom: -6px;
   right: -6px;
   cursor: nwse-resize;
+}
+
+.draw-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.color-swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.color-swatch.active {
+  border-color: var(--ink);
+}
+
+.ghost-btn.small {
+  padding: 6px 10px;
+  font-size: 13px;
 }

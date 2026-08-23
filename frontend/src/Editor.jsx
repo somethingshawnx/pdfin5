@@ -7,6 +7,13 @@ export default function Editor({ document, onStartOver }) {
   const [activeSpanId, setActiveSpanId] = useState(null);
   const [addedTexts, setAddedTexts] = useState([]);
   const [addMode, setAddMode] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
+  const [highlightMode, setHighlightMode] = useState(false);
+  const [drawings, setDrawings] = useState([]);
+  const [highlights, setHighlights] = useState([]);
+  const [liveStroke, setLiveStroke] = useState(null);
+  const [liveHighlight, setLiveHighlight] = useState(null);
+  const [strokeColor, setStrokeColor] = useState("#1a1d23");
   const [imageEdits, setImageEdits] = useState({});
   const [selectedImageId, setSelectedImageId] = useState(null);
   const fileInputRefs = useRef({});
@@ -139,6 +146,107 @@ export default function Editor({ document, onStartOver }) {
     });
   }
 
+  function toggleAddMode() {
+    setAddMode((v) => !v);
+    setDrawMode(false);
+    setHighlightMode(false);
+  }
+
+  function toggleDrawMode() {
+    setDrawMode((v) => !v);
+    setAddMode(false);
+    setHighlightMode(false);
+  }
+
+  function toggleHighlightMode() {
+    setHighlightMode((v) => !v);
+    setAddMode(false);
+    setDrawMode(false);
+  }
+
+  function toPdfPoint(e) {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / displayScale / zoom;
+    const y = (e.clientY - rect.top) / displayScale / zoom;
+    return [x, y];
+  }
+
+  function handleDrawLayerMouseDown(e) {
+    e.stopPropagation();
+
+    if (drawMode) {
+      let points = [toPdfPoint(e)];
+      setLiveStroke({ page: pageIndex, points });
+
+      function onMove(ev) {
+        points = [...points, toPdfPoint(ev)];
+        setLiveStroke({ page: pageIndex, points });
+      }
+
+      function onUp() {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        if (points.length >= 2) {
+          setDrawings((prev) => [
+            ...prev,
+            {
+              id: `draw_${Date.now()}`,
+              page: pageIndex,
+              points,
+              color: strokeColor,
+              strokeWidth: 2.5,
+            },
+          ]);
+        }
+        setLiveStroke(null);
+      }
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    } else if (highlightMode) {
+      const [startX, startY] = toPdfPoint(e);
+      setLiveHighlight({
+        page: pageIndex,
+        bbox: [startX, startY, startX, startY],
+      });
+
+      function onMove(ev) {
+        const [mx, my] = toPdfPoint(ev);
+        setLiveHighlight({ page: pageIndex, bbox: [startX, startY, mx, my] });
+      }
+
+      function onUp(ev) {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        const [mx, my] = toPdfPoint(ev);
+        const bbox = [
+          Math.min(startX, mx),
+          Math.min(startY, my),
+          Math.max(startX, mx),
+          Math.max(startY, my),
+        ];
+        if (bbox[2] - bbox[0] > 3 && bbox[3] - bbox[1] > 3) {
+          setHighlights((prev) => [
+            ...prev,
+            { id: `hl_${Date.now()}`, page: pageIndex, bbox, color: "#ffff00" },
+          ]);
+        }
+        setLiveHighlight(null);
+      }
+
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    }
+  }
+
+  function undoLastDrawing() {
+    setDrawings((prev) => prev.slice(0, -1));
+  }
+
+  function undoLastHighlight() {
+    setHighlights((prev) => prev.slice(0, -1));
+  }
+
   const imageEditCount = Object.keys(imageEdits).filter((id) => {
     const edit = imageEdits[id];
     const img = document.pages
@@ -155,7 +263,9 @@ export default function Editor({ document, onStartOver }) {
       (id) => editedText[id] !== findSpan(id)?.text,
     ).length +
     addedTexts.length +
-    imageEditCount;
+    imageEditCount +
+    drawings.length +
+    highlights.length;
 
   function findSpan(spanId) {
     return page.text_spans.find((s) => s.id === spanId);
@@ -250,6 +360,25 @@ export default function Editor({ document, onStartOver }) {
       }
     }
 
+    for (const d of drawings) {
+      ops.push({
+        type: "draw_path",
+        page: d.page,
+        points: d.points,
+        color: d.color,
+        stroke_width: d.strokeWidth,
+      });
+    }
+
+    for (const h of highlights) {
+      ops.push({
+        type: "highlight",
+        page: h.page,
+        bbox: h.bbox,
+        color: h.color,
+      });
+    }
+
     return ops;
   }
 
@@ -286,10 +415,53 @@ export default function Editor({ document, onStartOver }) {
         <div className="toolbar-group">
           <button
             className={addMode ? "tool-btn active" : "tool-btn"}
-            onClick={() => setAddMode((v) => !v)}
+            onClick={toggleAddMode}
           >
             + Add Text
           </button>
+          <button
+            className={drawMode ? "tool-btn active" : "tool-btn"}
+            onClick={toggleDrawMode}
+          >
+            ✎ Draw
+          </button>
+          <button
+            className={highlightMode ? "tool-btn active" : "tool-btn"}
+            onClick={toggleHighlightMode}
+          >
+            ▤ Highlight
+          </button>
+          {drawMode && (
+            <>
+              {["#1a1d23", "#dc2626", "#2f6fed", "#16a34a"].map((c) => (
+                <button
+                  key={c}
+                  className={
+                    strokeColor === c ? "color-swatch active" : "color-swatch"
+                  }
+                  style={{ background: c }}
+                  onClick={() => setStrokeColor(c)}
+                  title="Pen color"
+                />
+              ))}
+              <button
+                className="ghost-btn small"
+                onClick={undoLastDrawing}
+                title="Undo last stroke"
+              >
+                Undo
+              </button>
+            </>
+          )}
+          {highlightMode && (
+            <button
+              className="ghost-btn small"
+              onClick={undoLastHighlight}
+              title="Undo last highlight"
+            >
+              Undo
+            </button>
+          )}
         </div>
 
         <div className="toolbar-group page-nav">
@@ -346,6 +518,16 @@ export default function Editor({ document, onStartOver }) {
           Click anywhere on the page to place new text.
         </div>
       )}
+      {drawMode && (
+        <div className="hint-banner">
+          Click and drag to draw — useful for a signature too.
+        </div>
+      )}
+      {highlightMode && (
+        <div className="hint-banner">
+          Click and drag over text to highlight it.
+        </div>
+      )}
 
       <div className="canvas-scroll" ref={scrollRef}>
         <div
@@ -363,7 +545,11 @@ export default function Editor({ document, onStartOver }) {
               height: imgHeight,
               transform: `scale(${displayScale})`,
               transformOrigin: "top left",
-              cursor: addMode ? "crosshair" : "default",
+              cursor: addMode
+                ? "crosshair"
+                : drawMode || highlightMode
+                  ? "crosshair"
+                  : "default",
             }}
             onClick={handleCanvasClick}
           >
@@ -535,6 +721,72 @@ export default function Editor({ document, onStartOver }) {
                 </div>
               );
             })}
+
+            <svg
+              className="draw-layer"
+              width={imgWidth}
+              height={imgHeight}
+              viewBox={`0 0 ${page.width} ${page.height}`}
+              style={{
+                pointerEvents: drawMode || highlightMode ? "auto" : "none",
+              }}
+              onMouseDown={handleDrawLayerMouseDown}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {highlights
+                .filter((h) => h.page === pageIndex)
+                .map((h) => (
+                  <rect
+                    key={h.id}
+                    x={h.bbox[0]}
+                    y={h.bbox[1]}
+                    width={h.bbox[2] - h.bbox[0]}
+                    height={h.bbox[3] - h.bbox[1]}
+                    fill={h.color}
+                    opacity="0.4"
+                  />
+                ))}
+
+              {liveHighlight && liveHighlight.page === pageIndex && (
+                <rect
+                  x={Math.min(liveHighlight.bbox[0], liveHighlight.bbox[2])}
+                  y={Math.min(liveHighlight.bbox[1], liveHighlight.bbox[3])}
+                  width={Math.abs(
+                    liveHighlight.bbox[2] - liveHighlight.bbox[0],
+                  )}
+                  height={Math.abs(
+                    liveHighlight.bbox[3] - liveHighlight.bbox[1],
+                  )}
+                  fill="#ffff00"
+                  opacity="0.4"
+                />
+              )}
+
+              {drawings
+                .filter((d) => d.page === pageIndex)
+                .map((d) => (
+                  <polyline
+                    key={d.id}
+                    points={d.points.map((p) => p.join(",")).join(" ")}
+                    fill="none"
+                    stroke={d.color}
+                    strokeWidth={d.strokeWidth}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                ))}
+
+              {liveStroke && liveStroke.page === pageIndex && (
+                <polyline
+                  points={liveStroke.points.map((p) => p.join(",")).join(" ")}
+                  fill="none"
+                  stroke={strokeColor}
+                  strokeWidth={2.5}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              )}
+            </svg>
           </div>
         </div>
       </div>

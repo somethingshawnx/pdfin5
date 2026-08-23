@@ -20,6 +20,7 @@ import pdf_engine
 
 app = FastAPI(title="PDF Editor Prototype API")
 
+# Allow the local Vite dev server (default port 5173) to call this API.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -31,7 +32,7 @@ MAX_FILE_SIZE_MB = 25
 
 
 class EditOperation(BaseModel):
-    type: str  # "replace_text" | "add_text" | "delete_text" | "edit_image" | "delete_image"
+    type: str  # "replace_text" | "add_text" | "delete_text" | "edit_image" | "delete_image" | "draw_path" | "highlight"
     page: int
     bbox: Optional[List[float]] = None
     old_text: Optional[str] = None
@@ -39,10 +40,14 @@ class EditOperation(BaseModel):
     text: Optional[str] = None
     font_size: Optional[float] = 12
     color: Optional[str] = "#000000"
+    # Image editing fields
     xref: Optional[int] = None
     old_bbox: Optional[List[float]] = None
     new_bbox: Optional[List[float]] = None
     replacement_image_base64: Optional[str] = None
+    # Drawing / signature fields
+    points: Optional[List[List[float]]] = None
+    stroke_width: Optional[float] = 2
 
 
 class ExportRequest(BaseModel):
