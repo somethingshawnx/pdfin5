@@ -1,7 +1,12 @@
 import React, { useState, useRef, useEffect } from "react";
-import { pageImageUrl, exportPdf } from "./api";
+import { pageImageUrl, exportPdf, getSession } from "./api";
 
-export default function Editor({ document, onStartOver }) {
+export default function Editor({
+  document,
+  onStartOver,
+  session,
+  onSessionChange,
+}) {
   const [pageIndex, setPageIndex] = useState(0);
   const [editedText, setEditedText] = useState({});
   const [activeSpanId, setActiveSpanId] = useState(null);
@@ -19,6 +24,7 @@ export default function Editor({ document, onStartOver }) {
   const fileInputRefs = useRef({});
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
+  const [paymentRequired, setPaymentRequired] = useState(false);
   const [fitScale, setFitScale] = useState(1);
   const [zoomMultiplier, setZoomMultiplier] = useState(1);
   const canvasRef = useRef(null);
@@ -384,6 +390,7 @@ export default function Editor({ document, onStartOver }) {
 
   async function handleExport() {
     setExportError("");
+    setPaymentRequired(false);
     const operations = buildOperations();
     if (operations.length === 0) {
       setExportError("No edits yet — click some text or add a text box first.");
@@ -398,7 +405,14 @@ export default function Editor({ document, onStartOver }) {
       a.download = "edited.pdf";
       a.click();
       URL.revokeObjectURL(url);
+      getSession()
+        .then(onSessionChange)
+        .catch(() => {});
     } catch (err) {
+      if (err.paymentRequired) {
+        setPaymentRequired(true);
+        if (err.session) onSessionChange?.(err.session);
+      }
       setExportError(err.message || "Export failed.");
     } finally {
       setExporting(false);
@@ -501,7 +515,18 @@ export default function Editor({ document, onStartOver }) {
         </div>
 
         <div className="toolbar-group">
-          <span className="edit-count">{editedCount} edit(s)</span>
+          <span
+            className={
+              session?.requires_payment ? "edit-count warning" : "edit-count"
+            }
+          >
+            {session
+              ? session.requires_payment
+                ? `0 free edits left`
+                : `${session.free_edits_remaining} free edit(s) left`
+              : ""}
+          </span>
+          <span className="edit-count">{editedCount} change(s) pending</span>
           <button
             className="primary-btn"
             onClick={handleExport}
@@ -512,7 +537,15 @@ export default function Editor({ document, onStartOver }) {
         </div>
       </div>
 
-      {exportError && <div className="error-banner">{exportError}</div>}
+      {exportError && !paymentRequired && (
+        <div className="error-banner">{exportError}</div>
+      )}
+      {paymentRequired && (
+        <div className="paywall-banner">
+          <strong>Free edits used up.</strong> {exportError} This is expected at
+          this stage of the build — real payment collection is Phase 5.
+        </div>
+      )}
       {addMode && (
         <div className="hint-banner">
           Click anywhere on the page to place new text.

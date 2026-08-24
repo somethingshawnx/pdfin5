@@ -1,11 +1,20 @@
-import React, { useState } from "react";
-import { uploadPdf } from "./api";
+import React, { useState, useEffect } from "react";
+import { uploadPdf, getSession } from "./api";
 import Editor from "./Editor.jsx";
 
 export default function App() {
   const [document, setDocument] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [session, setSession] = useState(null);
+
+  useEffect(() => {
+    getSession()
+      .then(setSession)
+      .catch(() => {
+        /* Backend might not be running yet - the upload step will surface that error. */
+      });
+  }, []);
 
   async function handleFileChange(e) {
     const file = e.target.files?.[0];
@@ -22,9 +31,31 @@ export default function App() {
     }
   }
 
-  if (document) {
-    return <Editor document={document} onStartOver={() => setDocument(null)} />;
+  function refreshSession() {
+    getSession()
+      .then(setSession)
+      .catch(() => {});
   }
+
+  if (document) {
+    return (
+      <Editor
+        document={document}
+        onStartOver={() => {
+          setDocument(null);
+          refreshSession();
+        }}
+        session={session}
+        onSessionChange={setSession}
+      />
+    );
+  }
+
+  const creditsLine = session
+    ? session.requires_payment
+      ? `You've used your ${session.free_edits} free edits. Editing now costs ₹${session.price_per_edit_inr} per export.`
+      : `${session.free_edits_remaining} of ${session.free_edits} free edits remaining.`
+    : "First 2 edits free, then editing from ₹5.";
 
   return (
     <div className="upload-screen">
@@ -49,9 +80,12 @@ export default function App() {
 
         {error && <div className="error-banner">{error}</div>}
 
-        <p className="footnote">
-          First 2 edits free, then editing from ₹5. Nothing is charged in this
-          prototype yet.
+        <p
+          className={
+            session?.requires_payment ? "footnote warning" : "footnote"
+          }
+        >
+          {creditsLine} Nothing is charged in this prototype yet.
         </p>
       </div>
     </div>

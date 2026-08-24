@@ -397,3 +397,20 @@ button {
   padding: 6px 10px;
   font-size: 13px;
 }
+.edit-count.warning {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.footnote.warning {
+  color: #b91c1c;
+}
+
+.paywall-banner {
+  background: #fef2f2;
+  color: #7f1d1d;
+  border-bottom: 1px solid #fecaca;
+  padding: 10px 16px;
+  font-size: 14px;
+  text-align: center;
+}
