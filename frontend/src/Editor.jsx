@@ -1,5 +1,12 @@
 import React, { useState, useRef, useEffect } from "react";
 import { pageImageUrl, exportPdf, getSession } from "./api";
+import {
+  pageImageUrl,
+  exportPdf,
+  getSession,
+  createOrder,
+  verifyPayment,
+} from "./api";
 
 export default function Editor({
   document,
@@ -25,6 +32,8 @@ export default function Editor({
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
   const [paymentRequired, setPaymentRequired] = useState(false);
+  const [payingNow, setPayingNow] = useState(false);
+  const [paymentError, setPaymentError] = useState("");
   const [fitScale, setFitScale] = useState(1);
   const [zoomMultiplier, setZoomMultiplier] = useState(1);
   const canvasRef = useRef(null);
@@ -396,6 +405,63 @@ export default function Editor({
       setExportError("No edits yet — click some text or add a text box first.");
       return;
     }
+    async function handlePayment() {
+      setPaymentError("");
+      if (!window.Razorpay) {
+        setPaymentError(
+          "Payment widget didn't load - check your internet connection and that " +
+            "index.html includes the Razorpay checkout script.",
+        );
+        return;
+      }
+      setPayingNow(true);
+      try {
+        const order = await createOrder();
+
+        const options = {
+          key: order.key_id,
+          amount: order.amount,
+          currency: order.currency,
+          order_id: order.order_id,
+          name: "PDF Editor",
+          description: "1 additional edit credit",
+          theme: { color: "#2f6fed" },
+          handler: async function (response) {
+            try {
+              const updated = await verifyPayment({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              });
+              onSessionChange?.(updated);
+              setPaymentRequired(false);
+              setExportError("");
+            } catch (err) {
+              setPaymentError(err.message || "Payment verification failed.");
+            } finally {
+              setPayingNow(false);
+            }
+          },
+          modal: {
+            ondismiss: function () {
+              setPayingNow(false);
+            },
+          },
+        };
+
+        const rzp = new window.Razorpay(options);
+        rzp.on("payment.failed", function () {
+          setPaymentError(
+            "Payment failed. No credit was charged - you can try again.",
+          );
+          setPayingNow(false);
+        });
+        rzp.open();
+      } catch (err) {
+        setPaymentError(err.message || "Could not start payment.");
+        setPayingNow(false);
+      }
+    }
     setExporting(true);
     try {
       const blob = await exportPdf(document.doc_id, operations);
@@ -542,8 +608,19 @@ export default function Editor({
       )}
       {paymentRequired && (
         <div className="paywall-banner">
-          <strong>Free edits used up.</strong> {exportError} This is expected at
-          this stage of the build — real payment collection is Phase 5.
+          <div>
+            <strong>Free edits used up.</strong> {exportError}
+          </div>
+          <button
+            className="pay-btn"
+            onClick={handlePayment}
+            disabled={payingNow}
+          >
+            {payingNow
+              ? "Opening payment…"
+              : `Pay ₹${session?.price_per_edit_inr || 5} & Continue`}
+          </button>
+          {paymentError && <div className="payment-error">{paymentError}</div>}
         </div>
       )}
       {addMode && (
