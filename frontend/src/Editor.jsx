@@ -4,6 +4,7 @@ import { pageImageUrl, exportPdf, getSession, createOrder, verifyPayment } from 
 export default function Editor({ document, onStartOver, session, onSessionChange }) {
   const [pageIndex, setPageIndex] = useState(0);
   const [editedText, setEditedText] = useState({});
+  const [spanOverrides, setSpanOverrides] = useState({}); // per-span {font, size, bold}
   const [activeSpanId, setActiveSpanId] = useState(null);
   const [addedTexts, setAddedTexts] = useState([]);
   const [addMode, setAddMode] = useState(false);
@@ -347,7 +348,12 @@ export default function Editor({ document, onStartOver, session, onSessionChange
   const editedCount =
     Object.keys(editedText).filter(
       (id) => editedText[id] !== findSpan(id)?.text
-    ).length + addedTexts.length + imageEditCount + drawings.length + highlights.length + photos.length;
+    ).length +
+    Object.keys(spanOverrides).filter((id) => {
+      const ov = spanOverrides[id];
+      return ov && (ov.font !== undefined || ov.size !== undefined || ov.bold !== undefined);
+    }).length +
+    addedTexts.length + imageEditCount + drawings.length + highlights.length + photos.length;
 
   function findSpan(spanId) {
     return page.text_spans.find((s) => s.id === spanId);
@@ -398,17 +404,25 @@ export default function Editor({ document, onStartOver, session, onSessionChange
     for (const p of document.pages) {
       for (const span of p.text_spans) {
         const newText = editedText[span.id];
-        if (newText !== undefined && newText !== span.text) {
+        const ov = spanOverrides[span.id] || {};
+        const textChanged = newText !== undefined && newText !== span.text;
+        const fmtChanged = ov.font !== undefined || ov.size !== undefined || ov.bold !== undefined;
+        if (textChanged || fmtChanged) {
+          // Compute font_flags: bit 2^4 = bold (flag 16) per PDF spec
+          const baseFlags = span.flags || 0;
+          let newFlags = baseFlags;
+          if (ov.bold === true) newFlags = newFlags | 16;
+          else if (ov.bold === false) newFlags = newFlags & ~16;
           ops.push({
             type: "replace_text",
             page: p.page_number,
             bbox: span.bbox,
             old_text: span.text,
-            new_text: newText,
-            font_size: span.size,
+            new_text: newText !== undefined ? newText : span.text,
+            font_size: ov.size !== undefined ? ov.size : span.size,
             color: span.color,
-            font_name: span.font,
-            font_flags: span.flags,
+            font_name: ov.font !== undefined ? ov.font : span.font,
+            font_flags: newFlags,
           });
         }
       }
@@ -561,34 +575,55 @@ export default function Editor({ document, onStartOver, session, onSessionChange
     }
   }
 
+  // Active span + its current effective formatting
+  const activeSpan = activeSpanId ? page.text_spans.find((s) => s.id === activeSpanId) : null;
+  const activeOv = activeSpanId ? (spanOverrides[activeSpanId] || {}) : {};
+  const activeFontFamily = activeOv.font !== undefined ? activeOv.font : (activeSpan?.font?.split("+").pop().split("-")[0] || "Helvetica");
+  const activeFontSize = activeOv.size !== undefined ? activeOv.size : (activeSpan ? Math.round(activeSpan.size) : 12);
+  const activeBold = activeOv.bold !== undefined ? activeOv.bold : ((activeSpan?.flags || 0) & 16) !== 0;
+
+  const COMMON_FONTS = [
+    "Helvetica", "Times-Roman", "Courier", "Arial", "Georgia",
+    "Verdana", "Trebuchet MS", "Comic Sans MS", "Impact",
+  ];
+
+  function setActiveFont(font) {
+    if (!activeSpanId) return;
+    setSpanOverrides((prev) => ({ ...prev, [activeSpanId]: { ...(prev[activeSpanId] || {}), font } }));
+  }
+  function setActiveFontSize(size) {
+    if (!activeSpanId) return;
+    const n = parseFloat(size);
+    if (!isNaN(n) && n > 0)
+      setSpanOverrides((prev) => ({ ...prev, [activeSpanId]: { ...(prev[activeSpanId] || {}), size: n } }));
+  }
+  function toggleActiveBold() {
+    if (!activeSpanId) return;
+    setSpanOverrides((prev) => ({ ...prev, [activeSpanId]: { ...(prev[activeSpanId] || {}), bold: !activeBold } }));
+  }
+
   return (
     <div className="editor-screen">
       <div className="toolbar">
-        <button className="ghost-btn" onClick={onStartOver}>
+        <button className="ghost-btn" onClick={onStartOver} title="Upload a different PDF">
           ← New file
         </button>
 
+        <div className="toolbar-sep" />
+
+        {/* Tool buttons */}
         <div className="toolbar-group">
-          <button
-            className={addMode ? "tool-btn active" : "tool-btn"}
-            onClick={toggleAddMode}
-          >
-            + Add Text
+          <button className={addMode ? "tool-btn active" : "tool-btn"} onClick={toggleAddMode} title="Click the page to place a text box">
+            T+ Text
           </button>
-          <button
-            className={drawMode ? "tool-btn active" : "tool-btn"}
-            onClick={toggleDrawMode}
-          >
-            ✎ Draw
+          <button className="tool-btn" onClick={triggerPhotoUpload} title="Add an image or signature photo">
+            🖼 Image
           </button>
-          <button
-            className={highlightMode ? "tool-btn active" : "tool-btn"}
-            onClick={toggleHighlightMode}
-          >
-            ▤ Highlight
+          <button className={drawMode ? "tool-btn active" : "tool-btn"} onClick={toggleDrawMode} title="Freehand pen / draw signature">
+            ✏️ Draw
           </button>
-          <button className="tool-btn" onClick={triggerPhotoUpload} title="Add a photo or an image of your signature">
-            🖼 Add Photo
+          <button className={highlightMode ? "tool-btn active" : "tool-btn"} onClick={toggleHighlightMode} title="Drag to highlight text">
+            🖊 Highlight
           </button>
           <input
             ref={photoUploadInputRef}
@@ -600,72 +635,129 @@ export default function Editor({ document, onStartOver, session, onSessionChange
               e.target.value = "";
             }}
           />
-          {drawMode && (
-            <>
-              {["#1a1d23", "#dc2626", "#2f6fed", "#16a34a"].map((c) => (
+        </div>
+
+        {/* Draw colors / undo */}
+        {drawMode && (
+          <>
+            <div className="toolbar-sep" />
+            <div className="toolbar-group">
+              {["#ffffff", "#1a1d23", "#ef4444", "#6c47ff", "#10b981"].map((c) => (
                 <button
                   key={c}
                   className={strokeColor === c ? "color-swatch active" : "color-swatch"}
-                  style={{ background: c }}
+                  style={{ background: c, border: strokeColor === c ? "2px solid #a78bfa" : "2px solid #3d3d6b" }}
                   onClick={() => setStrokeColor(c)}
                   title="Pen color"
                 />
               ))}
-              <button className="ghost-btn small" onClick={undoLastDrawing} title="Undo last stroke">
-                Undo
-              </button>
-            </>
-          )}
-          {highlightMode && (
-            <button className="ghost-btn small" onClick={undoLastHighlight} title="Undo last highlight">
-              Undo
-            </button>
-          )}
-        </div>
+              <button className="ghost-btn small" onClick={undoLastDrawing}>⟲ Undo</button>
+            </div>
+          </>
+        )}
+        {highlightMode && (
+          <>
+            <div className="toolbar-sep" />
+            <button className="ghost-btn small" onClick={undoLastHighlight}>⟲ Undo</button>
+          </>
+        )}
 
+        {/* Active text formatting controls */}
+        {activeSpan && (
+          <>
+            <div className="toolbar-sep" />
+            {/* onMouseDown preventDefault prevents toolbar clicks from blurring the textarea */}
+            <div
+              className="toolbar-group"
+              style={{ gap: 5, alignItems: "center" }}
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              {/* Font family */}
+              <select
+                className="font-select"
+                value={activeFontFamily}
+                onChange={(e) => setActiveFont(e.target.value)}
+                title="Font family"
+              >
+                {COMMON_FONTS.map((f) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+                {!COMMON_FONTS.includes(activeFontFamily) && (
+                  <option value={activeFontFamily}>{activeFontFamily}</option>
+                )}
+              </select>
+
+              {/* Font size */}
+              <input
+                className="font-size-input"
+                type="number"
+                min="4"
+                max="200"
+                step="0.5"
+                value={activeFontSize}
+                onChange={(e) => setActiveFontSize(e.target.value)}
+                title="Font size (pt)"
+              />
+
+              {/* Bold toggle */}
+              <button
+                className={activeBold ? "fmt-btn active" : "fmt-btn"}
+                onClick={toggleActiveBold}
+                title="Bold"
+                style={{ fontWeight: "bold" }}
+              >
+                B
+              </button>
+
+              {/* Color swatch (read-only info) */}
+              <span
+                style={{ width: 20, height: 20, borderRadius: "50%", background: activeSpan.color, border: "2px solid #3d3d6b", flexShrink: 0, display: "inline-block" }}
+                title={`Color: ${activeSpan.color}`}
+              />
+            </div>
+          </>
+        )}
+
+        {/* Page nav */}
         <div className="toolbar-group page-nav">
           <button
+            className="ghost-btn"
             disabled={pageIndex === 0}
             onClick={() => setPageIndex((i) => Math.max(0, i - 1))}
           >
-            ‹ Prev
+            ‹
           </button>
-          <span>
-            Page {pageIndex + 1} / {document.page_count}
-          </span>
+          <span>Page {pageIndex + 1} / {document.page_count}</span>
           <button
+            className="ghost-btn"
             disabled={pageIndex === document.page_count - 1}
-            onClick={() =>
-              setPageIndex((i) => Math.min(document.page_count - 1, i + 1))
-            }
+            onClick={() => setPageIndex((i) => Math.min(document.page_count - 1, i + 1))}
           >
-            Next ›
+            ›
           </button>
         </div>
 
+        {/* Zoom */}
         <div className="toolbar-group">
-          <button className="zoom-btn" onClick={zoomOut} title="Zoom out">
-            −
-          </button>
-          <button className="zoom-pct" onClick={resetZoom} title="Reset to fit width">
-            {Math.round(displayScale * 100)}%
-          </button>
-          <button className="zoom-btn" onClick={zoomIn} title="Zoom in">
-            +
-          </button>
+          <button className="zoom-btn" onClick={zoomOut} title="Zoom out">−</button>
+          <button className="zoom-pct" onClick={resetZoom}>{Math.round(displayScale * 100)}%</button>
+          <button className="zoom-btn" onClick={zoomIn} title="Zoom in">+</button>
         </div>
 
+        <div className="toolbar-sep" />
+
+        {/* Credits + Download */}
         <div className="toolbar-group">
           <span className={session?.requires_payment ? "edit-count warning" : "edit-count"}>
             {session
               ? session.requires_payment
-                ? `0 free edits left`
-                : `${session.free_edits_remaining} free edit(s) left`
+                ? "⚠ No free exports left"
+                : `${session.free_edits_remaining} free left`
               : ""}
           </span>
-          <span className="edit-count">{editedCount} change(s) pending</span>
+          {editedCount > 0 && <span className="edit-count">{editedCount} edit{editedCount !== 1 ? "s" : ""}</span>}
           <button className="primary-btn" onClick={handleExport} disabled={exporting}>
-            {exporting ? "Exporting…" : "Download PDF"}
+            {exporting ? "Exporting…" : "⬇ Download PDF"}
           </button>
         </div>
       </div>
@@ -719,50 +811,99 @@ export default function Editor({ document, onStartOver, session, onSessionChange
 
             {page.text_spans.map((span) => {
               const [x0, y0, x1, y1] = span.bbox;
-              const style = {
+              const spanH = (y1 - y0) * zoom;
+              const spanW = (x1 - x0) * zoom;
+              const fontSize = span.size * zoom * 0.75;
+
+              // Base position/size for overlay
+              const baseStyle = {
                 left: x0 * zoom,
                 top: y0 * zoom,
-                width: (x1 - x0) * zoom,
-                height: (y1 - y0) * zoom,
-                fontSize: span.size * zoom * 0.75,
+                width: spanW,
+                height: spanH,
+                fontSize,
+                lineHeight: `${spanH}px`,
                 color: span.color,
               };
+
               const isEdited =
                 editedText[span.id] !== undefined && editedText[span.id] !== span.text;
 
+              // Active editing — show a textarea that covers the original text
               if (activeSpanId === span.id) {
+                const ov2 = spanOverrides[span.id] || {};
+                const previewSize = ov2.size !== undefined ? ov2.size * zoom * 0.75 : fontSize;
+                const previewBold = ov2.bold !== undefined ? ov2.bold : ((span.flags || 0) & 16) !== 0;
                 return (
                   <textarea
                     key={span.id}
                     className="span-editor active"
-                    style={style}
+                    style={{
+                      ...baseStyle,
+                      // Extend width a bit so user has room to type more
+                      width: Math.max(spanW, 120),
+                      minWidth: spanW,
+                      fontSize: previewSize,
+                      lineHeight: `${spanH}px`,
+                      fontWeight: previewBold ? "bold" : "normal",
+                      fontFamily: ov2.font || "inherit",
+                    }}
                     autoFocus
                     value={editedText[span.id] ?? span.text}
                     onChange={(e) =>
                       setEditedText((prev) => ({ ...prev, [span.id]: e.target.value }))
                     }
-                    onBlur={() => setActiveSpanId(null)}
+                    onBlur={(e) => {
+                      // Only clear active span if focus moved outside the toolbar area
+                      // Use a microtask so relatedTarget is populated correctly
+                      const related = e.relatedTarget;
+                      if (related && related.closest && related.closest('.toolbar')) return;
+                      setActiveSpanId(null);
+                    }}
+                    onClick={(e) => e.stopPropagation()}
                   />
                 );
               }
 
+              // Edited (not currently active) — opaque white box covering old text
+              if (isEdited) {
+                return (
+                  <div
+                    key={span.id}
+                    className="span-box edited"
+                    style={{
+                      ...baseStyle,
+                      width: "max-content",
+                      minWidth: spanW,
+                      // Must be opaque to cover the old PDF text underneath
+                      background: "white",
+                      paddingLeft: 2,
+                      paddingRight: 4,
+                      whiteSpace: "nowrap",
+                    }}
+                    title="Click to re-edit"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSpanClick(span);
+                    }}
+                  >
+                    {editedText[span.id]}
+                  </div>
+                );
+              }
+
+              // Normal unedited span — invisible hover target
               return (
                 <div
                   key={span.id}
-                  className={isEdited ? "span-box edited" : "span-box"}
-                  style={
-                    isEdited
-                      ? { ...style, width: "max-content", minWidth: style.width }
-                      : style
-                  }
+                  className="span-box"
+                  style={baseStyle}
                   title="Click to edit"
                   onClick={(e) => {
                     e.stopPropagation();
                     handleSpanClick(span);
                   }}
-                >
-                  {isEdited ? editedText[span.id] : ""}
-                </div>
+                />
               );
             })}
 

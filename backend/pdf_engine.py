@@ -141,6 +141,75 @@ def resolve_font(doc, page, font_name, flags, font_cache):
     return resolved_name
 
 
+def extract_document_fonts(doc_id: str) -> list:
+    """
+    Extract all unique fonts embedded in the PDF and return their raw bytes
+    as base64 so the frontend can register them as @font-face web fonts.
+    This gives pixel-accurate font rendering in the browser overlay.
+    Returns a list of dicts: { family, weight, style, format, base64 }
+    """
+    path = get_pdf_path(doc_id)
+    doc = pymupdf.open(path)
+    seen_xrefs = set()
+    fonts_out = []
+
+    for page in doc:
+        for f in page.get_fonts(full=True):
+            xref = f[0]
+            if xref in seen_xrefs:
+                continue
+            seen_xrefs.add(xref)
+
+            basefont = f[3] or ""
+            # Strip subset prefix e.g. "ABCDEF+SourceSansPro-Bold"
+            clean_name = basefont.split("+", 1)[-1] if "+" in basefont else basefont
+
+            try:
+                extracted = doc.extract_font(xref)
+                # extracted = (name, ext, type, content, encoding)
+                font_bytes = extracted[3] if len(extracted) > 3 else None
+                if not font_bytes or len(font_bytes) < 100:
+                    continue
+
+                ext = (extracted[1] or "ttf").lower()
+                # Determine MIME/format
+                if ext in ("otf",):
+                    fmt = "opentype"
+                elif ext in ("woff",):
+                    fmt = "woff"
+                elif ext in ("woff2",):
+                    fmt = "woff2"
+                else:
+                    fmt = "truetype"
+
+                # Detect bold/italic from font name
+                lower = clean_name.lower()
+                weight = "700" if any(x in lower for x in ("bold", "heavy", "black", "semibold", "medium")) else "400"
+                style = "italic" if any(x in lower for x in ("italic", "oblique", "slanted")) else "normal"
+
+                # Family = strip style suffixes for the CSS family name
+                family = clean_name
+                for suffix in ("-Bold", "-Italic", "-BoldItalic", "-Regular", "-Light",
+                               "-Medium", "-SemiBold", "-Heavy", "-Black", "-Oblique",
+                               "Bold", "Italic", "Regular"):
+                    family = family.replace(suffix, "")
+                family = family.strip("-_ ")
+
+                fonts_out.append({
+                    "family": family or clean_name,
+                    "full_name": clean_name,
+                    "weight": weight,
+                    "style": style,
+                    "format": fmt,
+                    "base64": base64.b64encode(font_bytes).decode("ascii"),
+                })
+            except Exception:
+                continue
+
+    doc.close()
+    return fonts_out
+
+
 def new_document_id():
     return uuid.uuid4().hex
 

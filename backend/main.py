@@ -171,6 +171,20 @@ def page_image(doc_id: str, page_number: int):
     return Response(content=png_bytes, media_type="image/png")
 
 
+@app.get("/api/fonts/{doc_id}")
+def get_document_fonts(doc_id: str):
+    """Return all fonts embedded in the PDF as base64 so the frontend can
+    register them as @font-face entries for accurate text preview."""
+    path = pdf_engine.get_pdf_path(doc_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Document not found.")
+    try:
+        fonts = pdf_engine.extract_document_fonts(doc_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not extract fonts: {exc}")
+    return fonts
+
+
 @app.post("/api/export/{doc_id}")
 def export_pdf(doc_id: str, req: ExportRequest, request: Request, response: Response):
     session_id = get_or_create_session_id(request, response)

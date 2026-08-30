@@ -1,5 +1,13 @@
 const API_BASE = "http://127.0.0.1:8000";
 
+export async function fetchDocumentFonts(docId) {
+  const res = await fetch(`${API_BASE}/api/fonts/${docId}`, {
+    credentials: "include",
+  });
+  if (!res.ok) return [];
+  return res.json();
+}
+
 export async function getSession() {
   const res = await fetch(`${API_BASE}/api/session`, {
     credentials: "include",
