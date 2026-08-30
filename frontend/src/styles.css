@@ -397,6 +397,7 @@ button {
   padding: 6px 10px;
   font-size: 13px;
 }
+
 .edit-count.warning {
   color: #b91c1c;
   font-weight: 600;
@@ -445,4 +446,12 @@ button {
   color: #b91c1c;
   font-weight: 600;
   font-size: 13px;
+}
+
+.image-action-btn.danger {
+  background: #dc2626;
+}
+
+.image-action-btn.danger:hover {
+  background: #b91c1c;
 }

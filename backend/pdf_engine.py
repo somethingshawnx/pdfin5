@@ -20,13 +20,10 @@ import pymupdf  # PyMuPDF
 STORAGE_DIR = os.path.join(os.path.dirname(__file__), "storage")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
-# Render pages at this zoom factor for a crisp on-screen image.
-# 2.0 == roughly 144 DPI (72 DPI is the PDF default).
 RENDER_ZOOM = 2.0
 
 
 def _color_int_to_hex(color_int):
-    """PyMuPDF gives span colors as a packed int (0xRRGGBB). Convert to '#rrggbb'."""
     if color_int is None:
         return "#000000"
     r = (color_int >> 16) & 0xFF
@@ -36,7 +33,6 @@ def _color_int_to_hex(color_int):
 
 
 def _hex_to_rgb01(hex_color):
-    """'#rrggbb' -> (r, g, b) floats 0..1, as PyMuPDF expects for drawing."""
     hex_color = hex_color.lstrip("#")
     r = int(hex_color[0:2], 16) / 255
     g = int(hex_color[2:4], 16) / 255
@@ -44,12 +40,112 @@ def _hex_to_rgb01(hex_color):
     return (r, g, b)
 
 
+def _normalize_font_name(name):
+    """Strip PDF subset prefixes (e.g. 'ABCDEF+Arial-Bold') and punctuation
+    so font names from different sources can be fuzzy-matched."""
+    if "+" in name:
+        name = name.split("+", 1)[1]
+    return "".join(ch.lower() for ch in name if ch.isalnum())
+
+
+def _flags_to_base14(flags, font_name=""):
+    """
+    Fallback when we can't find/reuse the original embedded font: pick the
+    closest built-in PDF font (Helvetica/Times/Courier family) based on the
+    span's font flags and name, matching bold/italic/serif/monospace.
+    """
+    is_bold = bool(flags & 2**4) or "bold" in font_name.lower()
+    is_italic = bool(flags & 2**1) or "italic" in font_name.lower() or "oblique" in font_name.lower()
+    is_monospace = bool(flags & 2**3) or "mono" in font_name.lower() or "courier" in font_name.lower()
+    is_serif = bool(flags & 2**2) or any(
+        s in font_name.lower() for s in ("times", "georgia", "serif", "garamond", "cambria")
+    )
+
+    if is_monospace:
+        family = "co"
+    elif is_serif:
+        family = "ti"
+    else:
+        family = "he"
+
+    if family == "he":
+        if is_bold and is_italic:
+            return "hebi"
+        if is_bold:
+            return "hebo"
+        if is_italic:
+            return "heit"
+        return "helv"
+    elif family == "ti":
+        if is_bold and is_italic:
+            return "tibi"
+        if is_bold:
+            return "tibo"
+        if is_italic:
+            return "tiit"
+        return "tiro"
+    else:
+        if is_bold and is_italic:
+            return "cobi"
+        if is_bold:
+            return "cobo"
+        if is_italic:
+            return "coit"
+        return "cour"
+
+
+def resolve_font(doc, page, font_name, flags, font_cache):
+    """
+    Figure out which font to use for inserted/replacement text, aiming to
+    match the original as closely as possible:
+
+    1. If the exact embedded font used by the original text is still
+       present in this PDF (common - documents reuse the same 2-3 fonts
+       throughout), extract and reuse the real font file. This gives a
+       pixel-perfect match, including custom/branded fonts.
+    2. Otherwise, fall back to the closest built-in PDF font (Helvetica,
+       Times, or Courier, with bold/italic as appropriate).
+
+    font_cache is a dict shared across one export call, so each font is
+    only extracted/embedded once even if used by many edits.
+    """
+    cache_key = font_name or "?"
+    if cache_key in font_cache:
+        return font_cache[cache_key]
+
+    resolved_name = None
+    target_normalized = _normalize_font_name(font_name) if font_name else ""
+
+    if target_normalized:
+        try:
+            for f in page.get_fonts(full=True):
+                xref, ext, fonttype, basefont = f[0], f[1], f[2], f[3]
+                if _normalize_font_name(basefont) == target_normalized:
+                    try:
+                        extracted = doc.extract_font(xref)
+                        buffer = extracted[3] if len(extracted) > 3 else None
+                        if buffer:
+                            internal_name = f"reuse_{xref}"
+                            page.insert_font(fontname=internal_name, fontbuffer=buffer)
+                            resolved_name = internal_name
+                            break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    if not resolved_name:
+        resolved_name = _flags_to_base14(flags or 0, font_name or "")
+
+    font_cache[cache_key] = resolved_name
+    return resolved_name
+
+
 def new_document_id():
     return uuid.uuid4().hex
 
 
 def save_upload(file_bytes: bytes) -> str:
-    """Save an uploaded PDF to storage and return its document id."""
     doc_id = new_document_id()
     path = os.path.join(STORAGE_DIR, f"{doc_id}.pdf")
     with open(path, "wb") as f:
@@ -62,10 +158,6 @@ def get_pdf_path(doc_id: str) -> str:
 
 
 def analyze_document(doc_id: str) -> dict:
-    """
-    Build the structured page model for every page in the document.
-    This is the "PDF Intelligence Engine" from the blueprint (section 12).
-    """
     path = get_pdf_path(doc_id)
     doc = pymupdf.open(path)
 
@@ -80,7 +172,7 @@ def analyze_document(doc_id: str) -> dict:
         spans_out = []
 
         for block in text_dict.get("blocks", []):
-            if block.get("type") != 0:  # 0 == text block, 1 == image block
+            if block.get("type") != 0:
                 continue
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
@@ -94,6 +186,7 @@ def analyze_document(doc_id: str) -> dict:
                         "id": span_id,
                         "text": text,
                         "font": span.get("font", "helv"),
+                        "flags": span.get("flags", 0),
                         "size": round(span.get("size", 12), 2),
                         "color": _color_int_to_hex(span.get("color")),
                         "bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
@@ -127,7 +220,6 @@ def analyze_document(doc_id: str) -> dict:
 
 
 def render_page_png(doc_id: str, page_number: int) -> bytes:
-    """Render a single page to PNG bytes at RENDER_ZOOM."""
     path = get_pdf_path(doc_id)
     doc = pymupdf.open(path)
     page = doc[page_number]
@@ -139,12 +231,9 @@ def render_page_png(doc_id: str, page_number: int) -> bytes:
 
 
 def apply_edits_and_export(doc_id: str, operations: list) -> str:
-    """
-    Apply a list of edit operations to the document and save the result
-    as a new PDF. Returns the path to the exported file.
-    """
     path = get_pdf_path(doc_id)
     doc = pymupdf.open(path)
+    font_cache = {}
 
     for op in operations:
         page_number = op.get("page", 0)
@@ -163,13 +252,16 @@ def apply_edits_and_export(doc_id: str, operations: list) -> str:
             if new_text:
                 font_size = op.get("font_size", 12)
                 color = _hex_to_rgb01(op.get("color", "#000000"))
+                font_name = resolve_font(
+                    doc, page, op.get("font_name", ""), op.get("font_flags", 0), font_cache
+                )
                 insert_point = pymupdf.Point(x0, y0 + font_size)
                 page.insert_text(
                     insert_point,
                     new_text,
                     fontsize=font_size,
                     color=color,
-                    fontname="helv",
+                    fontname=font_name,
                 )
 
         elif op_type == "add_text":
@@ -177,12 +269,15 @@ def apply_edits_and_export(doc_id: str, operations: list) -> str:
             font_size = op.get("font_size", 12)
             color = _hex_to_rgb01(op.get("color", "#000000"))
             insert_point = pymupdf.Point(x0, y0 + font_size)
+            font_name = resolve_font(
+                doc, page, op.get("font_name", ""), op.get("font_flags", 0), font_cache
+            )
             page.insert_text(
                 insert_point,
                 op.get("text", ""),
                 fontsize=font_size,
                 color=color,
-                fontname="helv",
+                fontname=font_name,
             )
 
         elif op_type == "delete_text":
@@ -196,6 +291,7 @@ def apply_edits_and_export(doc_id: str, operations: list) -> str:
             new_bbox = op.get("new_bbox", old_bbox)
             old_rect = pymupdf.Rect(*old_bbox)
             new_rect = pymupdf.Rect(*new_bbox)
+            rotate = op.get("rotate", 0)
 
             replacement_b64 = op.get("replacement_image_base64")
             if replacement_b64:
@@ -207,7 +303,16 @@ def apply_edits_and_export(doc_id: str, operations: list) -> str:
 
             page.add_redact_annot(old_rect, fill=(1, 1, 1))
             page.apply_redactions()
-            page.insert_image(new_rect, stream=img_bytes)
+            page.insert_image(new_rect, stream=img_bytes, rotate=rotate, keep_proportion=False)
+
+        elif op_type == "add_image":
+            x0, y0, x1, y1 = op["bbox"]
+            rect = pymupdf.Rect(x0, y0, x1, y1)
+            rotate = op.get("rotate", 0)
+            img_b64 = op.get("image_base64", "")
+            if img_b64:
+                img_bytes = base64.b64decode(img_b64)
+                page.insert_image(rect, stream=img_bytes, rotate=rotate, keep_proportion=False)
 
         elif op_type == "delete_image":
             x0, y0, x1, y1 = op["bbox"]

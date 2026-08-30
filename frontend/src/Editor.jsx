@@ -1,19 +1,7 @@
 import React, { useState, useRef, useEffect } from "react";
-import { pageImageUrl, exportPdf, getSession } from "./api";
-import {
-  pageImageUrl,
-  exportPdf,
-  getSession,
-  createOrder,
-  verifyPayment,
-} from "./api";
+import { pageImageUrl, exportPdf, getSession, createOrder, verifyPayment } from "./api";
 
-export default function Editor({
-  document,
-  onStartOver,
-  session,
-  onSessionChange,
-}) {
+export default function Editor({ document, onStartOver, session, onSessionChange }) {
   const [pageIndex, setPageIndex] = useState(0);
   const [editedText, setEditedText] = useState({});
   const [activeSpanId, setActiveSpanId] = useState(null);
@@ -29,6 +17,9 @@ export default function Editor({
   const [imageEdits, setImageEdits] = useState({});
   const [selectedImageId, setSelectedImageId] = useState(null);
   const fileInputRefs = useRef({});
+  const [photos, setPhotos] = useState([]);
+  const [selectedPhotoId, setSelectedPhotoId] = useState(null);
+  const photoUploadInputRef = useRef(null);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState("");
   const [paymentRequired, setPaymentRequired] = useState(false);
@@ -50,8 +41,7 @@ export default function Editor({
     function computeFitScale() {
       if (!scrollRef.current) return;
       const availableWidth = scrollRef.current.clientWidth - 64;
-      const scale =
-        availableWidth > 0 ? Math.min(1, availableWidth / imgWidth) : 1;
+      const scale = availableWidth > 0 ? Math.min(1, availableWidth / imgWidth) : 1;
       setFitScale(scale);
     }
     computeFitScale();
@@ -93,31 +83,22 @@ export default function Editor({
       let [x0, y0, x1, y1] = startBbox;
 
       if (mode === "move") {
-        x0 += dxPdf;
-        x1 += dxPdf;
-        y0 += dyPdf;
-        y1 += dyPdf;
+        x0 += dxPdf; x1 += dxPdf; y0 += dyPdf; y1 += dyPdf;
       } else if (mode === "resize-se") {
-        x1 += dxPdf;
-        y1 += dyPdf;
+        x1 += dxPdf; y1 += dyPdf;
       } else if (mode === "resize-sw") {
-        x0 += dxPdf;
-        y1 += dyPdf;
+        x0 += dxPdf; y1 += dyPdf;
       } else if (mode === "resize-ne") {
-        x1 += dxPdf;
-        y0 += dyPdf;
+        x1 += dxPdf; y0 += dyPdf;
       } else if (mode === "resize-nw") {
-        x0 += dxPdf;
-        y0 += dyPdf;
+        x0 += dxPdf; y0 += dyPdf;
       }
 
       if (x1 - x0 < 10) {
-        if (mode.includes("w")) x0 = x1 - 10;
-        else x1 = x0 + 10;
+        if (mode.includes("w")) x0 = x1 - 10; else x1 = x0 + 10;
       }
       if (y1 - y0 < 10) {
-        if (mode.includes("n")) y0 = y1 - 10;
-        else y1 = y0 + 10;
+        if (mode.includes("n")) y0 = y1 - 10; else y1 = y0 + 10;
       }
 
       setImageEdits((prev) => ({
@@ -158,6 +139,108 @@ export default function Editor({
       const next = { ...prev };
       delete next[imageId];
       return next;
+    });
+  }
+
+  function triggerPhotoUpload() {
+    photoUploadInputRef.current?.click();
+  }
+
+  function handlePhotoFileSelected(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(",")[1];
+      const img = new window.Image();
+      img.onload = () => {
+        const maxWidthPt = Math.min(180, page.width * 0.4);
+        const w = maxWidthPt;
+        const h = w * (img.naturalHeight / img.naturalWidth);
+        const x0 = (page.width - w) / 2;
+        const y0 = (page.height - h) / 2;
+        const id = `photo_${Date.now()}`;
+        setPhotos((prev) => [
+          ...prev,
+          { id, page: pageIndex, bbox: [x0, y0, x0 + w, y0 + h], dataUrl, base64, rotate: 0 },
+        ]);
+        setSelectedPhotoId(id);
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function startPhotoDrag(e, photo, mode) {
+    e.stopPropagation();
+    e.preventDefault();
+    setSelectedPhotoId(photo.id);
+    const startBbox = photo.bbox;
+    const startClientX = e.clientX;
+    const startClientY = e.clientY;
+
+    function onMove(ev) {
+      const dxPdf = (ev.clientX - startClientX) / displayScale / zoom;
+      const dyPdf = (ev.clientY - startClientY) / displayScale / zoom;
+      let [x0, y0, x1, y1] = startBbox;
+
+      if (mode === "move") {
+        x0 += dxPdf; x1 += dxPdf; y0 += dyPdf; y1 += dyPdf;
+      } else if (mode === "resize-se") {
+        x1 += dxPdf; y1 += dyPdf;
+      } else if (mode === "resize-sw") {
+        x0 += dxPdf; y1 += dyPdf;
+      } else if (mode === "resize-ne") {
+        x1 += dxPdf; y0 += dyPdf;
+      } else if (mode === "resize-nw") {
+        x0 += dxPdf; y0 += dyPdf;
+      }
+
+      if (x1 - x0 < 15) {
+        if (mode.includes("w")) x0 = x1 - 15; else x1 = x0 + 15;
+      }
+      if (y1 - y0 < 15) {
+        if (mode.includes("n")) y0 = y1 - 15; else y1 = y0 + 15;
+      }
+
+      setPhotos((prev) =>
+        prev.map((p) => (p.id === photo.id ? { ...p, bbox: [x0, y0, x1, y1] } : p))
+      );
+    }
+
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    }
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  function rotatePhoto(id) {
+    setPhotos((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, rotate: (p.rotate + 90) % 360 } : p))
+    );
+  }
+
+  function deletePhoto(id) {
+    setPhotos((prev) => prev.filter((p) => p.id !== id));
+    if (selectedPhotoId === id) setSelectedPhotoId(null);
+  }
+
+  function bringPhotoToFront(id) {
+    setPhotos((prev) => {
+      const found = prev.find((p) => p.id === id);
+      if (!found) return prev;
+      return [...prev.filter((p) => p.id !== id), found];
+    });
+  }
+
+  function sendPhotoToBack(id) {
+    setPhotos((prev) => {
+      const found = prev.find((p) => p.id === id);
+      if (!found) return prev;
+      return [found, ...prev.filter((p) => p.id !== id)];
     });
   }
 
@@ -204,13 +287,7 @@ export default function Editor({
         if (points.length >= 2) {
           setDrawings((prev) => [
             ...prev,
-            {
-              id: `draw_${Date.now()}`,
-              page: pageIndex,
-              points,
-              color: strokeColor,
-              strokeWidth: 2.5,
-            },
+            { id: `draw_${Date.now()}`, page: pageIndex, points, color: strokeColor, strokeWidth: 2.5 },
           ]);
         }
         setLiveStroke(null);
@@ -220,10 +297,7 @@ export default function Editor({
       window.addEventListener("mouseup", onUp);
     } else if (highlightMode) {
       const [startX, startY] = toPdfPoint(e);
-      setLiveHighlight({
-        page: pageIndex,
-        bbox: [startX, startY, startX, startY],
-      });
+      setLiveHighlight({ page: pageIndex, bbox: [startX, startY, startX, startY] });
 
       function onMove(ev) {
         const [mx, my] = toPdfPoint(ev);
@@ -264,23 +338,16 @@ export default function Editor({
 
   const imageEditCount = Object.keys(imageEdits).filter((id) => {
     const edit = imageEdits[id];
-    const img = document.pages
-      .flatMap((p) => p.images)
-      .find((i) => i.id === id);
+    const img = document.pages.flatMap((p) => p.images).find((i) => i.id === id);
     if (!img) return false;
-    const bboxChanged =
-      edit.bbox && JSON.stringify(edit.bbox) !== JSON.stringify(img.bbox);
+    const bboxChanged = edit.bbox && JSON.stringify(edit.bbox) !== JSON.stringify(img.bbox);
     return bboxChanged || !!edit.replacementBase64;
   }).length;
 
   const editedCount =
     Object.keys(editedText).filter(
-      (id) => editedText[id] !== findSpan(id)?.text,
-    ).length +
-    addedTexts.length +
-    imageEditCount +
-    drawings.length +
-    highlights.length;
+      (id) => editedText[id] !== findSpan(id)?.text
+    ).length + addedTexts.length + imageEditCount + drawings.length + highlights.length + photos.length;
 
   function findSpan(spanId) {
     return page.text_spans.find((s) => s.id === spanId);
@@ -297,6 +364,7 @@ export default function Editor({
   function handleCanvasClick(e) {
     if (!addMode) {
       setSelectedImageId(null);
+      setSelectedPhotoId(null);
       return;
     }
     const rect = canvasRef.current.getBoundingClientRect();
@@ -316,7 +384,7 @@ export default function Editor({
 
   function updateAddedText(id, text) {
     setAddedTexts((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, text } : t)),
+      prev.map((t) => (t.id === id ? { ...t, text } : t))
     );
   }
 
@@ -339,6 +407,8 @@ export default function Editor({
             new_text: newText,
             font_size: span.size,
             color: span.color,
+            font_name: span.font,
+            font_flags: span.flags,
           });
         }
       }
@@ -361,8 +431,7 @@ export default function Editor({
         const edit = imageEdits[img.id];
         if (!edit) continue;
         const newBbox = edit.bbox || img.bbox;
-        const bboxChanged =
-          JSON.stringify(newBbox) !== JSON.stringify(img.bbox);
+        const bboxChanged = JSON.stringify(newBbox) !== JSON.stringify(img.bbox);
         if (!bboxChanged && !edit.replacementBase64) continue;
         ops.push({
           type: "edit_image",
@@ -394,6 +463,16 @@ export default function Editor({
       });
     }
 
+    for (const ph of photos) {
+      ops.push({
+        type: "add_image",
+        page: ph.page,
+        bbox: ph.bbox,
+        image_base64: ph.base64,
+        rotate: ph.rotate,
+      });
+    }
+
     return ops;
   }
 
@@ -405,63 +484,6 @@ export default function Editor({
       setExportError("No edits yet — click some text or add a text box first.");
       return;
     }
-    async function handlePayment() {
-      setPaymentError("");
-      if (!window.Razorpay) {
-        setPaymentError(
-          "Payment widget didn't load - check your internet connection and that " +
-            "index.html includes the Razorpay checkout script.",
-        );
-        return;
-      }
-      setPayingNow(true);
-      try {
-        const order = await createOrder();
-
-        const options = {
-          key: order.key_id,
-          amount: order.amount,
-          currency: order.currency,
-          order_id: order.order_id,
-          name: "PDF Editor",
-          description: "1 additional edit credit",
-          theme: { color: "#2f6fed" },
-          handler: async function (response) {
-            try {
-              const updated = await verifyPayment({
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-              });
-              onSessionChange?.(updated);
-              setPaymentRequired(false);
-              setExportError("");
-            } catch (err) {
-              setPaymentError(err.message || "Payment verification failed.");
-            } finally {
-              setPayingNow(false);
-            }
-          },
-          modal: {
-            ondismiss: function () {
-              setPayingNow(false);
-            },
-          },
-        };
-
-        const rzp = new window.Razorpay(options);
-        rzp.on("payment.failed", function () {
-          setPaymentError(
-            "Payment failed. No credit was charged - you can try again.",
-          );
-          setPayingNow(false);
-        });
-        rzp.open();
-      } catch (err) {
-        setPaymentError(err.message || "Could not start payment.");
-        setPayingNow(false);
-      }
-    }
     setExporting(true);
     try {
       const blob = await exportPdf(document.doc_id, operations);
@@ -471,9 +493,7 @@ export default function Editor({
       a.download = "edited.pdf";
       a.click();
       URL.revokeObjectURL(url);
-      getSession()
-        .then(onSessionChange)
-        .catch(() => {});
+      getSession().then(onSessionChange).catch(() => { });
     } catch (err) {
       if (err.paymentRequired) {
         setPaymentRequired(true);
@@ -482,6 +502,62 @@ export default function Editor({
       setExportError(err.message || "Export failed.");
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function handlePayment() {
+    setPaymentError("");
+    if (!window.Razorpay) {
+      setPaymentError(
+        "Payment widget didn't load - check your internet connection and that " +
+        "index.html includes the Razorpay checkout script."
+      );
+      return;
+    }
+    setPayingNow(true);
+    try {
+      const order = await createOrder();
+
+      const options = {
+        key: order.key_id,
+        amount: order.amount,
+        currency: order.currency,
+        order_id: order.order_id,
+        name: "PDF Editor",
+        description: "1 additional edit credit",
+        theme: { color: "#2f6fed" },
+        handler: async function (response) {
+          try {
+            const updated = await verifyPayment({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            });
+            onSessionChange?.(updated);
+            setPaymentRequired(false);
+            setExportError("");
+          } catch (err) {
+            setPaymentError(err.message || "Payment verification failed.");
+          } finally {
+            setPayingNow(false);
+          }
+        },
+        modal: {
+          ondismiss: function () {
+            setPayingNow(false);
+          },
+        },
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.on("payment.failed", function () {
+        setPaymentError("Payment failed. No credit was charged - you can try again.");
+        setPayingNow(false);
+      });
+      rzp.open();
+    } catch (err) {
+      setPaymentError(err.message || "Could not start payment.");
+      setPayingNow(false);
     }
   }
 
@@ -511,34 +587,37 @@ export default function Editor({
           >
             ▤ Highlight
           </button>
+          <button className="tool-btn" onClick={triggerPhotoUpload} title="Add a photo or an image of your signature">
+            🖼 Add Photo
+          </button>
+          <input
+            ref={photoUploadInputRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) => {
+              handlePhotoFileSelected(e.target.files[0]);
+              e.target.value = "";
+            }}
+          />
           {drawMode && (
             <>
               {["#1a1d23", "#dc2626", "#2f6fed", "#16a34a"].map((c) => (
                 <button
                   key={c}
-                  className={
-                    strokeColor === c ? "color-swatch active" : "color-swatch"
-                  }
+                  className={strokeColor === c ? "color-swatch active" : "color-swatch"}
                   style={{ background: c }}
                   onClick={() => setStrokeColor(c)}
                   title="Pen color"
                 />
               ))}
-              <button
-                className="ghost-btn small"
-                onClick={undoLastDrawing}
-                title="Undo last stroke"
-              >
+              <button className="ghost-btn small" onClick={undoLastDrawing} title="Undo last stroke">
                 Undo
               </button>
             </>
           )}
           {highlightMode && (
-            <button
-              className="ghost-btn small"
-              onClick={undoLastHighlight}
-              title="Undo last highlight"
-            >
+            <button className="ghost-btn small" onClick={undoLastHighlight} title="Undo last highlight">
               Undo
             </button>
           )}
@@ -568,11 +647,7 @@ export default function Editor({
           <button className="zoom-btn" onClick={zoomOut} title="Zoom out">
             −
           </button>
-          <button
-            className="zoom-pct"
-            onClick={resetZoom}
-            title="Reset to fit width"
-          >
+          <button className="zoom-pct" onClick={resetZoom} title="Reset to fit width">
             {Math.round(displayScale * 100)}%
           </button>
           <button className="zoom-btn" onClick={zoomIn} title="Zoom in">
@@ -581,11 +656,7 @@ export default function Editor({
         </div>
 
         <div className="toolbar-group">
-          <span
-            className={
-              session?.requires_payment ? "edit-count warning" : "edit-count"
-            }
-          >
+          <span className={session?.requires_payment ? "edit-count warning" : "edit-count"}>
             {session
               ? session.requires_payment
                 ? `0 free edits left`
@@ -593,59 +664,38 @@ export default function Editor({
               : ""}
           </span>
           <span className="edit-count">{editedCount} change(s) pending</span>
-          <button
-            className="primary-btn"
-            onClick={handleExport}
-            disabled={exporting}
-          >
+          <button className="primary-btn" onClick={handleExport} disabled={exporting}>
             {exporting ? "Exporting…" : "Download PDF"}
           </button>
         </div>
       </div>
 
-      {exportError && !paymentRequired && (
-        <div className="error-banner">{exportError}</div>
-      )}
+      {exportError && !paymentRequired && <div className="error-banner">{exportError}</div>}
       {paymentRequired && (
         <div className="paywall-banner">
           <div>
             <strong>Free edits used up.</strong> {exportError}
           </div>
-          <button
-            className="pay-btn"
-            onClick={handlePayment}
-            disabled={payingNow}
-          >
-            {payingNow
-              ? "Opening payment…"
-              : `Pay ₹${session?.price_per_edit_inr || 5} & Continue`}
+          <button className="pay-btn" onClick={handlePayment} disabled={payingNow}>
+            {payingNow ? "Opening payment…" : `Pay ₹${session?.price_per_edit_inr || 5} & Continue`}
           </button>
           {paymentError && <div className="payment-error">{paymentError}</div>}
         </div>
       )}
       {addMode && (
-        <div className="hint-banner">
-          Click anywhere on the page to place new text.
-        </div>
+        <div className="hint-banner">Click anywhere on the page to place new text.</div>
       )}
       {drawMode && (
-        <div className="hint-banner">
-          Click and drag to draw — useful for a signature too.
-        </div>
+        <div className="hint-banner">Click and drag to draw — useful for a signature too.</div>
       )}
       {highlightMode && (
-        <div className="hint-banner">
-          Click and drag over text to highlight it.
-        </div>
+        <div className="hint-banner">Click and drag over text to highlight it.</div>
       )}
 
       <div className="canvas-scroll" ref={scrollRef}>
         <div
           className="page-canvas-wrapper"
-          style={{
-            width: imgWidth * displayScale,
-            height: imgHeight * displayScale,
-          }}
+          style={{ width: imgWidth * displayScale, height: imgHeight * displayScale }}
         >
           <div
             className="page-canvas"
@@ -655,11 +705,7 @@ export default function Editor({
               height: imgHeight,
               transform: `scale(${displayScale})`,
               transformOrigin: "top left",
-              cursor: addMode
-                ? "crosshair"
-                : drawMode || highlightMode
-                  ? "crosshair"
-                  : "default",
+              cursor: addMode ? "crosshair" : drawMode || highlightMode ? "crosshair" : "default",
             }}
             onClick={handleCanvasClick}
           >
@@ -682,8 +728,7 @@ export default function Editor({
                 color: span.color,
               };
               const isEdited =
-                editedText[span.id] !== undefined &&
-                editedText[span.id] !== span.text;
+                editedText[span.id] !== undefined && editedText[span.id] !== span.text;
 
               if (activeSpanId === span.id) {
                 return (
@@ -694,10 +739,7 @@ export default function Editor({
                     autoFocus
                     value={editedText[span.id] ?? span.text}
                     onChange={(e) =>
-                      setEditedText((prev) => ({
-                        ...prev,
-                        [span.id]: e.target.value,
-                      }))
+                      setEditedText((prev) => ({ ...prev, [span.id]: e.target.value }))
                     }
                     onBlur={() => setActiveSpanId(null)}
                   />
@@ -708,7 +750,11 @@ export default function Editor({
                 <div
                   key={span.id}
                   className={isEdited ? "span-box edited" : "span-box"}
-                  style={style}
+                  style={
+                    isEdited
+                      ? { ...style, width: "max-content", minWidth: style.width }
+                      : style
+                  }
                   title="Click to edit"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -821,9 +867,7 @@ export default function Editor({
                         <div
                           key={corner}
                           className={`resize-handle handle-${corner}`}
-                          onMouseDown={(e) =>
-                            startImageDrag(e, img, `resize-${corner}`)
-                          }
+                          onMouseDown={(e) => startImageDrag(e, img, `resize-${corner}`)}
                         />
                       ))}
                     </>
@@ -832,14 +876,99 @@ export default function Editor({
               );
             })}
 
+            {photos
+              .filter((ph) => ph.page === pageIndex)
+              .map((ph) => {
+                const [x0, y0, x1, y1] = ph.bbox;
+                const isSelected = selectedPhotoId === ph.id;
+                const style = {
+                  left: x0 * zoom,
+                  top: y0 * zoom,
+                  width: (x1 - x0) * zoom,
+                  height: (y1 - y0) * zoom,
+                };
+                const cssAngle = (360 - ph.rotate) % 360;
+
+                return (
+                  <div
+                    key={ph.id}
+                    className={isSelected ? "image-box selected" : "image-box"}
+                    style={style}
+                    onMouseDown={(e) => startPhotoDrag(e, ph, "move")}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <img
+                      className="image-preview"
+                      src={ph.dataUrl}
+                      alt="Added photo"
+                      draggable={false}
+                      style={{ transform: `rotate(${cssAngle}deg)` }}
+                    />
+
+                    {isSelected && (
+                      <>
+                        <div className="image-toolbar">
+                          <button
+                            className="image-action-btn"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              rotatePhoto(ph.id);
+                            }}
+                          >
+                            ⟳ Rotate
+                          </button>
+                          <button
+                            className="image-action-btn"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              bringPhotoToFront(ph.id);
+                            }}
+                          >
+                            Front
+                          </button>
+                          <button
+                            className="image-action-btn"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              sendPhotoToBack(ph.id);
+                            }}
+                          >
+                            Back
+                          </button>
+                          <button
+                            className="image-action-btn danger"
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deletePhoto(ph.id);
+                            }}
+                          >
+                            Delete
+                          </button>
+                        </div>
+
+                        {["nw", "ne", "sw", "se"].map((corner) => (
+                          <div
+                            key={corner}
+                            className={`resize-handle handle-${corner}`}
+                            onMouseDown={(e) => startPhotoDrag(e, ph, `resize-${corner}`)}
+                          />
+                        ))}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+
             <svg
               className="draw-layer"
               width={imgWidth}
               height={imgHeight}
               viewBox={`0 0 ${page.width} ${page.height}`}
-              style={{
-                pointerEvents: drawMode || highlightMode ? "auto" : "none",
-              }}
+              style={{ pointerEvents: drawMode || highlightMode ? "auto" : "none" }}
               onMouseDown={handleDrawLayerMouseDown}
               onClick={(e) => e.stopPropagation()}
             >
@@ -861,12 +990,8 @@ export default function Editor({
                 <rect
                   x={Math.min(liveHighlight.bbox[0], liveHighlight.bbox[2])}
                   y={Math.min(liveHighlight.bbox[1], liveHighlight.bbox[3])}
-                  width={Math.abs(
-                    liveHighlight.bbox[2] - liveHighlight.bbox[0],
-                  )}
-                  height={Math.abs(
-                    liveHighlight.bbox[3] - liveHighlight.bbox[1],
-                  )}
+                  width={Math.abs(liveHighlight.bbox[2] - liveHighlight.bbox[0])}
+                  height={Math.abs(liveHighlight.bbox[3] - liveHighlight.bbox[1])}
                   fill="#ffff00"
                   opacity="0.4"
                 />

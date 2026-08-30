@@ -63,10 +63,14 @@ class EditOperation(BaseModel):
     text: Optional[str] = None
     font_size: Optional[float] = 12
     color: Optional[str] = "#000000"
+    font_name: Optional[str] = None
+    font_flags: Optional[int] = 0
     xref: Optional[int] = None
     old_bbox: Optional[List[float]] = None
     new_bbox: Optional[List[float]] = None
     replacement_image_base64: Optional[str] = None
+    image_base64: Optional[str] = None
+    rotate: Optional[int] = 0
     points: Optional[List[List[float]]] = None
     stroke_width: Optional[float] = 2
 
