@@ -304,111 +304,122 @@ def apply_edits_and_export(doc_id: str, operations: list) -> str:
     doc = pymupdf.open(path)
     font_cache = {}
 
+    # Group operations by page so redactions can be batched.
+    # apply_redactions() must be called once per page after ALL redact annots
+    # are added — calling it mid-loop corrupts subsequent annotations.
+    from collections import defaultdict
+    ops_by_page = defaultdict(list)
     for op in operations:
-        page_number = op.get("page", 0)
-        if page_number < 0 or page_number >= len(doc):
-            continue
-        page = doc[page_number]
-        op_type = op.get("type")
+        pn = op.get("page", 0)
+        if 0 <= pn < len(doc):
+            ops_by_page[pn].append(op)
 
-        if op_type == "replace_text":
-            x0, y0, x1, y1 = op["bbox"]
-            rect = pymupdf.Rect(x0, y0, x1, y1)
-            page.add_redact_annot(rect, fill=(1, 1, 1))
+    for page_number, page_ops in ops_by_page.items():
+        page = doc[page_number]
+
+        # Pass 1: queue all redactions
+        needs_redact = False
+        for op in page_ops:
+            t = op.get("type")
+            if t in ("replace_text", "delete_text"):
+                x0, y0, x1, y1 = op["bbox"]
+                page.add_redact_annot(pymupdf.Rect(x0, y0, x1, y1), fill=(1, 1, 1))
+                needs_redact = True
+            elif t == "edit_image":
+                page.add_redact_annot(pymupdf.Rect(*op["old_bbox"]), fill=(1, 1, 1))
+                needs_redact = True
+            elif t == "delete_image":
+                page.add_redact_annot(pymupdf.Rect(*op["bbox"]), fill=(1, 1, 1))
+                needs_redact = True
+
+        if needs_redact:
             page.apply_redactions()
 
-            new_text = op.get("new_text", "")
-            if new_text:
+        # Pass 2: insert new content
+        for op in page_ops:
+            t = op.get("type")
+
+            if t == "replace_text":
+                new_text = op.get("new_text", "")
+                if not new_text:
+                    continue
+                x0, y0, x1, y1 = op["bbox"]
                 font_size = op.get("font_size", 12)
                 color = _hex_to_rgb01(op.get("color", "#000000"))
                 font_name = resolve_font(
                     doc, page, op.get("font_name", ""), op.get("font_flags", 0), font_cache
                 )
-                insert_point = pymupdf.Point(x0, y0 + font_size)
+                # y1 is the bbox bottom which is very close to the text baseline
+                # for most fonts — this matches the original text position better
+                # than y0 + font_size which over-shoots for large text.
                 page.insert_text(
-                    insert_point,
+                    pymupdf.Point(x0, y1),
                     new_text,
                     fontsize=font_size,
                     color=color,
                     fontname=font_name,
+                    render_mode=0,
                 )
 
-        elif op_type == "add_text":
-            x0, y0, x1, y1 = op["bbox"]
-            font_size = op.get("font_size", 12)
-            color = _hex_to_rgb01(op.get("color", "#000000"))
-            insert_point = pymupdf.Point(x0, y0 + font_size)
-            font_name = resolve_font(
-                doc, page, op.get("font_name", ""), op.get("font_flags", 0), font_cache
-            )
-            page.insert_text(
-                insert_point,
-                op.get("text", ""),
-                fontsize=font_size,
-                color=color,
-                fontname=font_name,
-            )
+            elif t == "add_text":
+                x0, y0, x1, y1 = op["bbox"]
+                font_size = op.get("font_size", 12)
+                color = _hex_to_rgb01(op.get("color", "#000000"))
+                font_name = resolve_font(
+                    doc, page, op.get("font_name", ""), op.get("font_flags", 0), font_cache
+                )
+                # For newly placed text the user clicked at y0; text baseline
+                # is y0 + font_size (text descends from the click point).
+                page.insert_text(
+                    pymupdf.Point(x0, y0 + font_size),
+                    op.get("text", ""),
+                    fontsize=font_size,
+                    color=color,
+                    fontname=font_name,
+                    render_mode=0,
+                )
 
-        elif op_type == "delete_text":
-            x0, y0, x1, y1 = op["bbox"]
-            rect = pymupdf.Rect(x0, y0, x1, y1)
-            page.add_redact_annot(rect, fill=(1, 1, 1))
-            page.apply_redactions()
+            elif t == "edit_image":
+                new_rect = pymupdf.Rect(*op.get("new_bbox", op["old_bbox"]))
+                replacement_b64 = op.get("replacement_image_base64")
+                if replacement_b64:
+                    img_bytes = base64.b64decode(replacement_b64)
+                else:
+                    img_info = doc.extract_image(op["xref"])
+                    img_bytes = img_info["image"]
+                page.insert_image(new_rect, stream=img_bytes,
+                                  rotate=op.get("rotate", 0), keep_proportion=False)
 
-        elif op_type == "edit_image":
-            old_bbox = op["old_bbox"]
-            new_bbox = op.get("new_bbox", old_bbox)
-            old_rect = pymupdf.Rect(*old_bbox)
-            new_rect = pymupdf.Rect(*new_bbox)
-            rotate = op.get("rotate", 0)
+            elif t == "add_image":
+                x0, y0, x1, y1 = op["bbox"]
+                img_b64 = op.get("image_base64", "")
+                if img_b64:
+                    img_bytes = base64.b64decode(img_b64)
+                    page.insert_image(
+                        pymupdf.Rect(x0, y0, x1, y1),
+                        stream=img_bytes,
+                        rotate=op.get("rotate", 0),
+                        keep_proportion=False,
+                    )
 
-            replacement_b64 = op.get("replacement_image_base64")
-            if replacement_b64:
-                img_bytes = base64.b64decode(replacement_b64)
-            else:
-                xref = op["xref"]
-                img_info = doc.extract_image(xref)
-                img_bytes = img_info["image"]
+            elif t == "draw_path":
+                points = op["points"]
+                if len(points) >= 2:
+                    color = _hex_to_rgb01(op.get("color", "#1a1d23"))
+                    shape = page.new_shape()
+                    shape.draw_polyline([pymupdf.Point(x, y) for x, y in points])
+                    shape.finish(color=color, width=op.get("stroke_width", 2), closePath=False)
+                    shape.commit()
 
-            page.add_redact_annot(old_rect, fill=(1, 1, 1))
-            page.apply_redactions()
-            page.insert_image(new_rect, stream=img_bytes, rotate=rotate, keep_proportion=False)
-
-        elif op_type == "add_image":
-            x0, y0, x1, y1 = op["bbox"]
-            rect = pymupdf.Rect(x0, y0, x1, y1)
-            rotate = op.get("rotate", 0)
-            img_b64 = op.get("image_base64", "")
-            if img_b64:
-                img_bytes = base64.b64decode(img_b64)
-                page.insert_image(rect, stream=img_bytes, rotate=rotate, keep_proportion=False)
-
-        elif op_type == "delete_image":
-            x0, y0, x1, y1 = op["bbox"]
-            rect = pymupdf.Rect(x0, y0, x1, y1)
-            page.add_redact_annot(rect, fill=(1, 1, 1))
-            page.apply_redactions()
-
-        elif op_type == "draw_path":
-            points = op["points"]
-            if len(points) >= 2:
-                color = _hex_to_rgb01(op.get("color", "#1a1d23"))
-                width = op.get("stroke_width", 2)
-                shape = page.new_shape()
-                shape.draw_polyline([pymupdf.Point(x, y) for x, y in points])
-                shape.finish(color=color, width=width, closePath=False)
-                shape.commit()
-
-        elif op_type == "highlight":
-            x0, y0, x1, y1 = op["bbox"]
-            rect = pymupdf.Rect(x0, y0, x1, y1)
-            annot = page.add_highlight_annot(rect)
-            color = _hex_to_rgb01(op.get("color", "#ffff00"))
-            annot.set_colors(stroke=color)
-            annot.update()
+            elif t == "highlight":
+                x0, y0, x1, y1 = op["bbox"]
+                annot = page.add_highlight_annot(pymupdf.Rect(x0, y0, x1, y1))
+                annot.set_colors(stroke=_hex_to_rgb01(op.get("color", "#ffff00")))
+                annot.update()
 
     out_id = new_document_id()
     out_path = os.path.join(STORAGE_DIR, f"{out_id}_export.pdf")
-    doc.save(out_path)
+    # garbage=4 removes unused objects; deflate=True compresses streams
+    doc.save(out_path, garbage=4, deflate=True)
     doc.close()
     return out_path

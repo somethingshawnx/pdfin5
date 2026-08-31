@@ -667,6 +667,17 @@ button { font-family: inherit; font-size: 14px; }
   box-shadow: 0 0 10px rgba(108,71,255,0.4);
 }
 
+.color-picker-input {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #2a2a45;
+  border-radius: var(--radius-sm);
+  background: #1e1e35;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 /* Banners */
 .hint-banner {
   background: rgba(108,71,255,0.12);
@@ -794,27 +805,29 @@ button { font-family: inherit; font-size: 14px; }
 /* Active editing textarea — covers old text, matches original look */
 .span-editor {
   position: absolute;
-  /* Fully opaque white — hides the original PDF text beneath */
   background: #ffffff;
-  border: 2px solid var(--accent);
-  box-shadow: 0 0 0 3px rgba(108,71,255,0.18), 0 2px 12px rgba(0,0,0,0.12);
-  border-radius: 3px;
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  border-radius: 0;
   padding: 0 4px;
   font-family: inherit;
   resize: none;
-  outline: none;
   z-index: 20;
-  color: #111;
+  color: inherit;
   overflow: hidden;
   white-space: nowrap;
-  /* line-height is set inline to match span height */
+}
+.span-editor:focus,
+.span-editor:focus-visible {
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .added-text-wrap { position: absolute; }
 
 .span-editor.added {
-  width: 100%;
-  height: 100%;
   border: 2px dashed var(--accent);
   background: rgba(255,255,255,0.95);
   color: #111;

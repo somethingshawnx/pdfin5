@@ -1,11 +1,11 @@
 import React, { useState, useRef, useEffect } from "react";
-import { pageImageUrl, exportPdf, getSession, createOrder, verifyPayment } from "./api";
+import { pageImageUrl, exportPdf, getSession, createOrder, verifyPayment, fetchDocumentFonts } from "./api";
 
 export default function Editor({ document, onStartOver, session, onSessionChange }) {
   const [pageIndex, setPageIndex] = useState(0);
   const [editedText, setEditedText] = useState({});
-  const [spanOverrides, setSpanOverrides] = useState({}); // per-span {font, size, bold}
-  const [activeSpanId, setActiveSpanId] = useState(null);
+  const [spanOverrides, setSpanOverrides] = useState({}); // per-span {font, size, bold, italic, underline, color}
+  const [activeTextId, setActiveTextId] = useState(null);
   const [addedTexts, setAddedTexts] = useState([]);
   const [addMode, setAddMode] = useState(false);
   const [drawMode, setDrawMode] = useState(false);
@@ -15,6 +15,7 @@ export default function Editor({ document, onStartOver, session, onSessionChange
   const [liveStroke, setLiveStroke] = useState(null);
   const [liveHighlight, setLiveHighlight] = useState(null);
   const [strokeColor, setStrokeColor] = useState("#1a1d23");
+  const [docFonts, setDocFonts] = useState([]);
   const [imageEdits, setImageEdits] = useState({});
   const [selectedImageId, setSelectedImageId] = useState(null);
   const fileInputRefs = useRef({});
@@ -57,6 +58,41 @@ export default function Editor({ document, onStartOver, session, onSessionChange
   function zoomIn() {
     setZoomMultiplier((z) => Math.min(4, +(z + 0.25).toFixed(2)));
   }
+
+  useEffect(() => {
+    // Reset state on document change
+    setPageIndex(0);
+    setEditedText({});
+    setSpanOverrides({});
+    setAddedTexts([]);
+    setDrawings([]);
+    setHighlights([]);
+    setImageEdits({});
+    setPhotos([]);
+    setActiveTextId(null);
+    setDocFonts([]);
+
+    // Fetch custom fonts from backend and inject as @font-face
+    fetchDocumentFonts(document.doc_id)
+      .then((fonts) => {
+        setDocFonts(fonts.map(f => f.family));
+        const style = window.document.createElement("style");
+        let css = "";
+        fonts.forEach((f) => {
+          css += `
+            @font-face {
+              font-family: "${f.family}";
+              src: url("data:font/${f.format};base64,${f.base64}") format("${f.format}");
+              font-weight: ${f.weight};
+              font-style: ${f.style};
+            }
+          `;
+        });
+        style.innerHTML = css;
+        window.document.head.appendChild(style);
+      })
+      .catch((err) => console.warn("Failed to load doc fonts", err));
+  }, [document.doc_id]);
 
   function zoomOut() {
     setZoomMultiplier((z) => Math.max(0.25, +(z - 0.25).toFixed(2)));
@@ -361,7 +397,7 @@ export default function Editor({ document, onStartOver, session, onSessionChange
 
   function handleSpanClick(span) {
     if (addMode) return;
-    setActiveSpanId(span.id);
+    setActiveTextId(span.id);
     if (!(span.id in editedText)) {
       setEditedText((prev) => ({ ...prev, [span.id]: span.text }));
     }
@@ -371,6 +407,9 @@ export default function Editor({ document, onStartOver, session, onSessionChange
     if (!addMode) {
       setSelectedImageId(null);
       setSelectedPhotoId(null);
+      // Don't unselect active text here because click on span handles it, 
+      // but clicking canvas should blur. We'll handle it via onBlur or wrapper click.
+      setActiveTextId(null);
       return;
     }
     const rect = canvasRef.current.getBoundingClientRect();
@@ -379,18 +418,23 @@ export default function Editor({ document, onStartOver, session, onSessionChange
     const newBox = {
       id: `new_${Date.now()}`,
       page: pageIndex,
-      bbox: [x, y, x + 150, y + 20],
+      bbox: [x, y, x + 150, y + 24],
       text: "",
-      font_size: 12,
+      font_size: 16,
+      font: "Helvetica",
+      bold: false,
+      italic: false,
+      underline: false,
       color: "#000000",
     };
     setAddedTexts((prev) => [...prev, newBox]);
     setAddMode(false);
+    setActiveTextId(newBox.id);
   }
 
-  function updateAddedText(id, text) {
+  function updateAddedText(id, updates) {
     setAddedTexts((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, text } : t))
+      prev.map((t) => (t.id === id ? { ...t, ...updates } : t))
     );
   }
 
@@ -406,13 +450,16 @@ export default function Editor({ document, onStartOver, session, onSessionChange
         const newText = editedText[span.id];
         const ov = spanOverrides[span.id] || {};
         const textChanged = newText !== undefined && newText !== span.text;
-        const fmtChanged = ov.font !== undefined || ov.size !== undefined || ov.bold !== undefined;
+        const fmtChanged = ov.font !== undefined || ov.size !== undefined || ov.bold !== undefined || ov.italic !== undefined || ov.color !== undefined;
         if (textChanged || fmtChanged) {
-          // Compute font_flags: bit 2^4 = bold (flag 16) per PDF spec
+          // Compute font_flags: bit 2^4 = bold (flag 16), 2^1 = italic (flag 2)
           const baseFlags = span.flags || 0;
           let newFlags = baseFlags;
           if (ov.bold === true) newFlags = newFlags | 16;
           else if (ov.bold === false) newFlags = newFlags & ~16;
+          if (ov.italic === true) newFlags = newFlags | 2;
+          else if (ov.italic === false) newFlags = newFlags & ~2;
+          
           ops.push({
             type: "replace_text",
             page: p.page_number,
@@ -420,9 +467,10 @@ export default function Editor({ document, onStartOver, session, onSessionChange
             old_text: span.text,
             new_text: newText !== undefined ? newText : span.text,
             font_size: ov.size !== undefined ? ov.size : span.size,
-            color: span.color,
+            color: ov.color !== undefined ? ov.color : span.color,
             font_name: ov.font !== undefined ? ov.font : span.font,
             font_flags: newFlags,
+            underline: ov.underline || false
           });
         }
       }
@@ -430,6 +478,9 @@ export default function Editor({ document, onStartOver, session, onSessionChange
 
     for (const t of addedTexts) {
       if (t.text.trim() === "") continue;
+      let flags = 0;
+      if (t.bold) flags |= 16;
+      if (t.italic) flags |= 2;
       ops.push({
         type: "add_text",
         page: t.page,
@@ -437,6 +488,9 @@ export default function Editor({ document, onStartOver, session, onSessionChange
         text: t.text,
         font_size: t.font_size,
         color: t.color,
+        font_name: t.font,
+        font_flags: flags,
+        underline: t.underline || false
       });
     }
 
@@ -576,30 +630,51 @@ export default function Editor({ document, onStartOver, session, onSessionChange
   }
 
   // Active span + its current effective formatting
-  const activeSpan = activeSpanId ? page.text_spans.find((s) => s.id === activeSpanId) : null;
-  const activeOv = activeSpanId ? (spanOverrides[activeSpanId] || {}) : {};
-  const activeFontFamily = activeOv.font !== undefined ? activeOv.font : (activeSpan?.font?.split("+").pop().split("-")[0] || "Helvetica");
-  const activeFontSize = activeOv.size !== undefined ? activeOv.size : (activeSpan ? Math.round(activeSpan.size) : 12);
-  const activeBold = activeOv.bold !== undefined ? activeOv.bold : ((activeSpan?.flags || 0) & 16) !== 0;
+  const activeSpan = activeTextId ? page.text_spans.find((s) => s.id === activeTextId) : null;
+  const activeAddedText = activeTextId ? addedTexts.find((t) => t.id === activeTextId) : null;
+  const isActive = activeSpan || activeAddedText;
+
+  const activeOv = activeSpan ? (spanOverrides[activeTextId] || {}) : {};
+  
+  const activeFontFamily = activeAddedText ? activeAddedText.font : (activeOv.font !== undefined ? activeOv.font : (activeSpan?.font?.split("+").pop().split("-")[0] || "Helvetica"));
+  const activeFontSize = activeAddedText ? activeAddedText.font_size : (activeOv.size !== undefined ? activeOv.size : (activeSpan ? Math.round(activeSpan.size) : 12));
+  const activeBold = activeAddedText ? activeAddedText.bold : (activeOv.bold !== undefined ? activeOv.bold : ((activeSpan?.flags || 0) & 16) !== 0);
+  const activeItalic = activeAddedText ? activeAddedText.italic : (activeOv.italic !== undefined ? activeOv.italic : ((activeSpan?.flags || 0) & 2) !== 0);
+  const activeUnderline = activeAddedText ? activeAddedText.underline : (activeOv.underline !== undefined ? activeOv.underline : false);
+  const activeColor = activeAddedText ? activeAddedText.color : (activeOv.color !== undefined ? activeOv.color : (activeSpan?.color || "#000000"));
 
   const COMMON_FONTS = [
     "Helvetica", "Times-Roman", "Courier", "Arial", "Georgia",
-    "Verdana", "Trebuchet MS", "Comic Sans MS", "Impact",
-  ];
+    "Verdana", "Trebuchet MS", "Comic Sans MS", "Impact", "Tahoma",
+    ...docFonts
+  ].filter((v, i, a) => a.indexOf(v) === i); // Unique fonts
 
   function setActiveFont(font) {
-    if (!activeSpanId) return;
-    setSpanOverrides((prev) => ({ ...prev, [activeSpanId]: { ...(prev[activeSpanId] || {}), font } }));
+    if (activeAddedText) updateAddedText(activeTextId, { font });
+    else if (activeSpan) setSpanOverrides((prev) => ({ ...prev, [activeTextId]: { ...(prev[activeTextId] || {}), font } }));
   }
   function setActiveFontSize(size) {
-    if (!activeSpanId) return;
     const n = parseFloat(size);
-    if (!isNaN(n) && n > 0)
-      setSpanOverrides((prev) => ({ ...prev, [activeSpanId]: { ...(prev[activeSpanId] || {}), size: n } }));
+    if (!isNaN(n) && n > 0) {
+      if (activeAddedText) updateAddedText(activeTextId, { font_size: n });
+      else if (activeSpan) setSpanOverrides((prev) => ({ ...prev, [activeTextId]: { ...(prev[activeTextId] || {}), size: n } }));
+    }
   }
   function toggleActiveBold() {
-    if (!activeSpanId) return;
-    setSpanOverrides((prev) => ({ ...prev, [activeSpanId]: { ...(prev[activeSpanId] || {}), bold: !activeBold } }));
+    if (activeAddedText) updateAddedText(activeTextId, { bold: !activeBold });
+    else if (activeSpan) setSpanOverrides((prev) => ({ ...prev, [activeTextId]: { ...(prev[activeTextId] || {}), bold: !activeBold } }));
+  }
+  function toggleActiveItalic() {
+    if (activeAddedText) updateAddedText(activeTextId, { italic: !activeItalic });
+    else if (activeSpan) setSpanOverrides((prev) => ({ ...prev, [activeTextId]: { ...(prev[activeTextId] || {}), italic: !activeItalic } }));
+  }
+  function toggleActiveUnderline() {
+    if (activeAddedText) updateAddedText(activeTextId, { underline: !activeUnderline });
+    else if (activeSpan) setSpanOverrides((prev) => ({ ...prev, [activeTextId]: { ...(prev[activeTextId] || {}), underline: !activeUnderline } }));
+  }
+  function setActiveColor(color) {
+    if (activeAddedText) updateAddedText(activeTextId, { color });
+    else if (activeSpan) setSpanOverrides((prev) => ({ ...prev, [activeTextId]: { ...(prev[activeTextId] || {}), color } }));
   }
 
   return (
@@ -663,19 +738,17 @@ export default function Editor({ document, onStartOver, session, onSessionChange
         )}
 
         {/* Active text formatting controls */}
-        {activeSpan && (
+        {isActive && (
           <>
             <div className="toolbar-sep" />
-            {/* onMouseDown preventDefault prevents toolbar clicks from blurring the textarea */}
             <div
               className="toolbar-group"
               style={{ gap: 5, alignItems: "center" }}
-              onMouseDown={(e) => e.preventDefault()}
             >
-              {/* Font family */}
               <select
                 className="font-select"
                 value={activeFontFamily}
+                onMouseDown={(e) => e.stopPropagation()}
                 onChange={(e) => setActiveFont(e.target.value)}
                 title="Font family"
               >
@@ -687,7 +760,6 @@ export default function Editor({ document, onStartOver, session, onSessionChange
                 )}
               </select>
 
-              {/* Font size */}
               <input
                 className="font-size-input"
                 type="number"
@@ -695,24 +767,45 @@ export default function Editor({ document, onStartOver, session, onSessionChange
                 max="200"
                 step="0.5"
                 value={activeFontSize}
+                onMouseDown={(e) => e.stopPropagation()}
                 onChange={(e) => setActiveFontSize(e.target.value)}
                 title="Font size (pt)"
               />
 
-              {/* Bold toggle */}
               <button
                 className={activeBold ? "fmt-btn active" : "fmt-btn"}
-                onClick={toggleActiveBold}
+                onMouseDown={(e) => { e.preventDefault(); toggleActiveBold(); }}
                 title="Bold"
                 style={{ fontWeight: "bold" }}
               >
                 B
               </button>
 
-              {/* Color swatch (read-only info) */}
-              <span
-                style={{ width: 20, height: 20, borderRadius: "50%", background: activeSpan.color, border: "2px solid #3d3d6b", flexShrink: 0, display: "inline-block" }}
-                title={`Color: ${activeSpan.color}`}
+              <button
+                className={activeItalic ? "fmt-btn active" : "fmt-btn"}
+                onMouseDown={(e) => { e.preventDefault(); toggleActiveItalic(); }}
+                title="Italic"
+                style={{ fontStyle: "italic" }}
+              >
+                I
+              </button>
+
+              <button
+                className={activeUnderline ? "fmt-btn active" : "fmt-btn"}
+                onMouseDown={(e) => { e.preventDefault(); toggleActiveUnderline(); }}
+                title="Underline"
+                style={{ textDecoration: "underline" }}
+              >
+                U
+              </button>
+
+              <input
+                type="color"
+                className="color-picker-input"
+                value={activeColor}
+                onMouseDown={(e) => e.stopPropagation()}
+                onChange={(e) => setActiveColor(e.target.value)}
+                title="Text Color"
               />
             </div>
           </>
@@ -830,23 +923,30 @@ export default function Editor({ document, onStartOver, session, onSessionChange
                 editedText[span.id] !== undefined && editedText[span.id] !== span.text;
 
               // Active editing — show a textarea that covers the original text
-              if (activeSpanId === span.id) {
+              if (activeTextId === span.id) {
                 const ov2 = spanOverrides[span.id] || {};
                 const previewSize = ov2.size !== undefined ? ov2.size * zoom * 0.75 : fontSize;
                 const previewBold = ov2.bold !== undefined ? ov2.bold : ((span.flags || 0) & 16) !== 0;
+                const previewItalic = ov2.italic !== undefined ? ov2.italic : ((span.flags || 0) & 2) !== 0;
+                
                 return (
                   <textarea
                     key={span.id}
                     className="span-editor active"
                     style={{
                       ...baseStyle,
+                      left: baseStyle.left - 5, // offset padding/border
+                      top: baseStyle.top - 1,   // offset border
                       // Extend width a bit so user has room to type more
-                      width: Math.max(spanW, 120),
-                      minWidth: spanW,
+                      width: Math.max(spanW + 10, 120),
+                      minWidth: spanW + 10,
                       fontSize: previewSize,
                       lineHeight: `${spanH}px`,
                       fontWeight: previewBold ? "bold" : "normal",
+                      fontStyle: previewItalic ? "italic" : "normal",
+                      textDecoration: ov2.underline ? "underline" : "none",
                       fontFamily: ov2.font || "inherit",
+                      color: ov2.color !== undefined ? ov2.color : span.color,
                     }}
                     autoFocus
                     value={editedText[span.id] ?? span.text}
@@ -854,11 +954,9 @@ export default function Editor({ document, onStartOver, session, onSessionChange
                       setEditedText((prev) => ({ ...prev, [span.id]: e.target.value }))
                     }
                     onBlur={(e) => {
-                      // Only clear active span if focus moved outside the toolbar area
-                      // Use a microtask so relatedTarget is populated correctly
                       const related = e.relatedTarget;
                       if (related && related.closest && related.closest('.toolbar')) return;
-                      setActiveSpanId(null);
+                      setActiveTextId(null);
                     }}
                     onClick={(e) => e.stopPropagation()}
                   />
@@ -867,19 +965,31 @@ export default function Editor({ document, onStartOver, session, onSessionChange
 
               // Edited (not currently active) — opaque white box covering old text
               if (isEdited) {
+                const ov3 = spanOverrides[span.id] || {};
+                const previewBold = ov3.bold !== undefined ? ov3.bold : ((span.flags || 0) & 16) !== 0;
+                const previewItalic = ov3.italic !== undefined ? ov3.italic : ((span.flags || 0) & 2) !== 0;
+                // Use original PDF font name as fallback for accurate preview
+                const rawFont = span.font?.split("+").pop() || "";
+                const fontFamilyFallback = ov3.font || rawFont.split("-")[0] || "inherit";
                 return (
                   <div
                     key={span.id}
                     className="span-box edited"
                     style={{
                       ...baseStyle,
+                      left: baseStyle.left - 2,
                       width: "max-content",
-                      minWidth: spanW,
-                      // Must be opaque to cover the old PDF text underneath
+                      minWidth: spanW + 4,
                       background: "white",
                       paddingLeft: 2,
                       paddingRight: 4,
                       whiteSpace: "nowrap",
+                      fontFamily: fontFamilyFallback,
+                      fontWeight: previewBold ? "bold" : "normal",
+                      fontStyle: previewItalic ? "italic" : "normal",
+                      textDecoration: ov3.underline ? "underline" : "none",
+                      color: ov3.color !== undefined ? ov3.color : span.color,
+                      fontSize: ov3.size !== undefined ? ov3.size * zoom * 0.75 : fontSize,
                     }}
                     title="Click to re-edit"
                     onClick={(e) => {
@@ -910,27 +1020,52 @@ export default function Editor({ document, onStartOver, session, onSessionChange
             {addedTexts
               .filter((t) => t.page === pageIndex)
               .map((t) => {
-                const [x0, y0, x1, y1] = t.bbox;
+                const [x0, y0] = t.bbox;
+                const isActiveAdded = activeTextId === t.id;
                 const style = {
                   left: x0 * zoom,
                   top: y0 * zoom,
-                  width: (x1 - x0) * zoom,
-                  height: (y1 - y0) * zoom,
                   fontSize: t.font_size * zoom * 0.75,
                   color: t.color,
+                  fontFamily: t.font || "inherit",
+                  fontWeight: t.bold ? "bold" : "normal",
+                  fontStyle: t.italic ? "italic" : "normal",
+                  textDecoration: t.underline ? "underline" : "none",
                 };
                 return (
-                  <div key={t.id} className="added-text-wrap" style={style}>
+                  <div
+                    key={t.id}
+                    className={`added-text-wrap ${isActiveAdded ? 'active' : ''}`}
+                    style={style}
+                    onClick={(e) => { e.stopPropagation(); setActiveTextId(t.id); }}
+                  >
                     <input
                       className="span-editor added"
+                      style={{
+                        minWidth: "150px",
+                        width: "max-content",
+                        background: isActiveAdded ? "rgba(255,255,255,0.95)" : "transparent",
+                        border: isActiveAdded ? "2px dashed var(--accent)" : "2px dashed transparent",
+                        cursor: isActiveAdded ? "text" : "pointer",
+                        padding: "2px 4px",
+                        outline: "none",
+                        fontSize: "inherit",
+                        fontFamily: "inherit",
+                        fontWeight: "inherit",
+                        fontStyle: "inherit",
+                        textDecoration: "inherit",
+                        color: "inherit",
+                      }}
                       value={t.text}
                       placeholder="Type text…"
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => updateAddedText(t.id, e.target.value)}
+                      onChange={(e) => updateAddedText(t.id, { text: e.target.value })}
                     />
+                    {/* Always render remove-btn but hide it; use onMouseDown+preventDefault so blur doesn't clear activeTextId before delete fires */}
                     <button
                       className="remove-btn"
-                      onClick={(e) => {
+                      style={{ display: isActiveAdded ? "flex" : "none" }}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
                         e.stopPropagation();
                         removeAddedText(t.id);
                       }}
